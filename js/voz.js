@@ -3,6 +3,8 @@
    intermediario de Cloudflare. Aquí NO hay ninguna clave.
    El audio llega en WAV (24 kHz) y se convierte a MP3 en el
    propio navegador con lamejs (js/vendor/lame.min.js).
+   Si Gemini alcanza su límite, se usa la voz de respaldo de
+   Cloudflare (MeloTTS), que llega en MP3 y se pasa a 24 kHz.
    ========================================================== */
 
 var Voz = (function () {
@@ -10,10 +12,12 @@ var Voz = (function () {
 
   var URL_INTERMEDIARIO = 'https://fabricadvideos.d-e-knovacore.workers.dev/';
   var TIEMPO_MAXIMO = 110000;          // por fragmento
-  var MAX_FRAGMENTO = 1200;            // caracteres por pedido de audio
+  var MAX_FRAGMENTO_GEMINI = 2400;     // caracteres por pedido a Gemini (menos pedidos = menos límites)
+  var MAX_FRAGMENTO_CF = 1000;         // caracteres por pedido a Cloudflare
+  var FRECUENCIA = 24000;              // muestras por segundo de todo el audio
   var PAUSA_ENTRE_ESCENAS = 0.8;       // segundos de silencio entre escenas
-  var ESPERA_POR_LIMITE = 30;          // segundos de espera si se alcanza el límite por minuto
-  var REINTENTOS_POR_LIMITE = 3;
+  var ESPERA_POR_LIMITE = 60;          // segundos de espera si se alcanza el límite por minuto
+  var REINTENTOS_POR_LIMITE = 1;       // después se cambia a la voz de Cloudflare
   var CLAVE_PREFERENCIAS = 'fabricaOscura.voz.v1';
 
   // Voces básicas de Gemini, por si la lista de voces latinoamericanas no carga.
@@ -30,6 +34,12 @@ var Voz = (function () {
     { id: 'Vindemiatrix', nombre: 'Vindemiatrix', genero: 'female', descripcion: 'delicada' },
     { id: 'Sulafat', nombre: 'Sulafat', genero: 'female', descripcion: 'cálida' }
   ];
+
+  // Voz de respaldo de Cloudflare: sin límite por minuto, una sola voz y sin estilos.
+  var VOZ_CLOUDFLARE = {
+    id: 'cloudflare', nombre: 'Voz de Cloudflare', genero: 'cloudflare', proveedor: 'cloudflare',
+    descripcion: 'español, sin límite por minuto (no usa los estilos)'
+  };
 
   var ACENTO_LATINO = ' Habla en español latinoamericano neutro.';
 
@@ -91,7 +101,11 @@ var Voz = (function () {
         return datos;
       });
     }, function (e) {
-      if (e && e.name === 'AbortError') throw new Error(mensajeDeError(504));
+      if (e && e.name === 'AbortError') {
+        var lento = new Error(mensajeDeError(504));
+        lento.estado = 504;
+        throw lento;
+      }
       throw new Error('No se pudo conectar con el intermediario. Revisa tu conexión a internet.');
     }).finally(function () {
       if (temporizador) clearTimeout(temporizador);
@@ -105,9 +119,9 @@ var Voz = (function () {
         v.latina = true;
         return v;
       });
-      return latinas.concat(VOCES_RESPALDO);
+      return latinas.concat(VOCES_RESPALDO, [VOZ_CLOUDFLARE]);
     }, function () {
-      return VOCES_RESPALDO.slice();
+      return VOCES_RESPALDO.concat([VOZ_CLOUDFLARE]);
     });
   }
 
@@ -215,6 +229,21 @@ var Voz = (function () {
     });
   }
 
+  // MP3 → muestras de 16 bits a 24 kHz (el navegador decodifica y cambia la frecuencia).
+  function mp3APCM(bytes) {
+    var Contexto = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+    if (!Contexto) return Promise.reject(new Error('Este navegador no puede leer el audio de Cloudflare. Usa Chrome o Edge.'));
+    var copia = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+    return new Contexto(1, 1, FRECUENCIA).decodeAudioData(copia).then(function (buf) {
+      var datos = buf.getChannelData(0), muestras = new Int16Array(datos.length);
+      for (var i = 0; i < datos.length; i++) {
+        var x = Math.max(-1, Math.min(1, datos[i]));
+        muestras[i] = x < 0 ? x * 32768 : x * 32767;
+      }
+      return { muestras: muestras, frecuencia: FRECUENCIA };
+    });
+  }
+
   /* ---------------- Generación ---------------- */
 
   function textoEstilo(clave, voz) {
@@ -238,8 +267,16 @@ var Voz = (function () {
   // durante esta visita a la página (la voz elegida se mantiene).
   var estiloNoAdmitido = false;
 
+  function sintetizarCloudflare(texto) {
+    return enviar({ accion: 'voz-cloudflare', texto: texto }).then(function (datos) {
+      if (!datos.audio) throw new Error('Cloudflare no devolvió audio. Intenta de nuevo.');
+      return mp3APCM(base64ABytes(datos.audio));
+    });
+  }
+
   // Un fragmento de texto → muestras de audio. Si se alcanza el límite por minuto, espera y reintenta.
   function sintetizar(texto, voz, estilo, alEsperar, intento) {
+    if (voz.proveedor === 'cloudflare') return sintetizarCloudflare(texto);
     intento = intento || 0;
     var conEstilo = !estiloNoAdmitido;
     return enviar({ accion: 'voz', texto: texto, voz: voz.id, estilo: conEstilo ? textoEstilo(estilo, voz) : '' }).then(function (datos) {
@@ -260,19 +297,20 @@ var Voz = (function () {
     });
   }
 
-  // Divide un texto largo en trozos que terminan en punto, sin pasar de MAX_FRAGMENTO.
-  function dividir(texto) {
+  // Divide un texto largo en trozos que terminan en punto, sin pasar de "maximo" caracteres.
+  function dividir(texto, maximo) {
+    maximo = maximo || MAX_FRAGMENTO_GEMINI;
     var frases = texto.replace(/\s+/g, ' ').trim().match(/[^.!?…]+[.!?…]+["»”)]*\s*|[^.!?…]+$/g) || [];
     var trozos = [], actual = '';
     frases.forEach(function (f) {
-      while (f.length > MAX_FRAGMENTO) {
-        var corte = f.lastIndexOf(' ', MAX_FRAGMENTO);
-        if (corte < 1) corte = MAX_FRAGMENTO;
+      while (f.length > maximo) {
+        var corte = f.lastIndexOf(' ', maximo);
+        if (corte < 1) corte = maximo;
         if (actual) { trozos.push(actual.trim()); actual = ''; }
         trozos.push(f.slice(0, corte).trim());
         f = f.slice(corte);
       }
-      if ((actual + f).length > MAX_FRAGMENTO && actual) { trozos.push(actual.trim()); actual = ''; }
+      if ((actual + f).length > maximo && actual) { trozos.push(actual.trim()); actual = ''; }
       actual += f;
     });
     if (actual.trim()) trozos.push(actual.trim());
@@ -285,18 +323,38 @@ var Voz = (function () {
     });
   }
 
+  // Errores por los que conviene pasar a la voz de Cloudflare: límite, saturación o lentitud de Gemini.
+  function convieneRespaldo(err) {
+    return err.estado === 429 || err.estado === 500 || err.estado === 503 || err.estado === 504 || err.estado === 524;
+  }
+
   // Narra todas las escenas. alProgreso({ hecho, total, mensaje }). cancelado() → true para detener.
   // Devuelve también "segmentos": qué texto suena en qué segundo (para subtítulos y video).
+  // Si Gemini falla por su límite, vuelve a narrar TODO con la voz de Cloudflare (para que no cambie
+  // de voz a mitad de la historia) y lo indica con "respaldo: true".
   function narrarProyecto(proyecto, voz, estilo, alProgreso, cancelado) {
+    return narrarCon(proyecto, voz, estilo, alProgreso, cancelado).catch(function (err) {
+      if (voz.proveedor === 'cloudflare' || !convieneRespaldo(err) || (cancelado && cancelado())) throw err;
+      alProgreso({ hecho: 0, total: 1, mensaje: 'Gemini alcanzó su límite. Cambiando a la voz de Cloudflare para toda la historia…' });
+      return narrarCon(proyecto, VOZ_CLOUDFLARE, estilo, alProgreso, cancelado).then(function (a) {
+        a.respaldo = true;
+        return a;
+      });
+    });
+  }
+
+  function narrarCon(proyecto, voz, estilo, alProgreso, cancelado) {
+    var maximo = voz.proveedor === 'cloudflare' ? MAX_FRAGMENTO_CF : MAX_FRAGMENTO_GEMINI;
     var trabajos = [];
     proyecto.escenas.forEach(function (e, i) {
-      dividir(e.narracion || '').forEach(function (t, j) {
+      dividir(e.narracion || '', maximo).forEach(function (t, j) {
         trabajos.push({ texto: t, escena: i + 1, escenaId: e.id, primeroDeEscena: j === 0 });
       });
     });
     if (!trabajos.length) return Promise.reject(new Error('Ninguna escena tiene narración. Escríbela o genérala con IA primero.'));
 
-    var partes = [], segmentos = [], frecuencia = 24000, posicion = 0, k = 0;
+    var partes = [], segmentos = [], frecuencia = FRECUENCIA, posicion = 0, k = 0;
+    var quien = voz.proveedor === 'cloudflare' ? 'Generando voz de Cloudflare' : 'Generando voz';
     function siguiente() {
       if (cancelado && cancelado()) return Promise.reject(new Error('Generación de audio cancelada.'));
       if (k >= trabajos.length) {
@@ -304,7 +362,7 @@ var Voz = (function () {
         return { muestras: muestras, frecuencia: frecuencia, duracion: muestras.length / frecuencia, segmentos: segmentos };
       }
       var t = trabajos[k];
-      alProgreso({ hecho: k, total: trabajos.length, mensaje: 'Generando voz: escena ' + t.escena + ' (parte ' + (k + 1) + ' de ' + trabajos.length + ')…' });
+      alProgreso({ hecho: k, total: trabajos.length, mensaje: quien + ': escena ' + t.escena + ' (parte ' + (k + 1) + ' de ' + trabajos.length + ')…' });
       return sintetizar(t.texto, voz, estilo, function (s) {
         alProgreso({ hecho: k, total: trabajos.length, mensaje: 'Límite por minuto de Gemini alcanzado. Reintentando en ' + s + ' s…' });
       }).then(function (a) {
@@ -327,6 +385,7 @@ var Voz = (function () {
   return {
     ESTILOS: ESTILOS,
     VOCES_RESPALDO: VOCES_RESPALDO,
+    VOZ_CLOUDFLARE: VOZ_CLOUDFLARE,
     leerPreferencias: leerPreferencias,
     guardarPreferencias: guardarPreferencias,
     cargarVoces: cargarVoces,

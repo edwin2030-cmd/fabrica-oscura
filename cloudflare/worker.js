@@ -1,7 +1,7 @@
 /* ==========================================================
    Fábrica Oscura — intermediario seguro
-   Textos y voces con Gemini; imágenes con Workers AI de
-   Cloudflare. Se pega en un Worker de Cloudflare.
+   Textos y voces con Gemini; imágenes y voz de respaldo con
+   Workers AI de Cloudflare. Se pega en un Worker de Cloudflare.
    La clave de Gemini NO va aquí: se guarda en Cloudflare
    como secreto llamado GEMINI_API_KEY. Las imágenes usan la
    conexión (binding) de Workers AI llamada AI, sin clave.
@@ -139,6 +139,27 @@ async function generarVoz(texto, voz, estilo, clave) {
   return ultimo;
 }
 
+/* ---------------- Voz de respaldo (Workers AI de Cloudflare) ---------------- */
+
+// MeloTTS: voz en español, sin límite por minuto y casi sin gasto
+// (unos 0,0002 $ por minuto de audio, dentro de lo gratuito diario).
+var MODELO_VOZ_CF = '@cf/myshell-ai/melotts';
+
+async function generarVozCloudflare(env, texto) {
+  try {
+    var resultado = await env.AI.run(MODELO_VOZ_CF, { prompt: texto, lang: 'es' });
+    var audio = resultado && (resultado.audio || resultado.result && resultado.result.audio);
+    if (typeof audio !== 'string' || !audio) return { estado: 502, error: 'Cloudflare no devolvió audio' };
+    return { estado: 200, datos: { audio: audio, formato: 'mp3', modelo: MODELO_VOZ_CF } };
+  } catch (e) {
+    var mensaje = String((e && e.message) || e || '');
+    if (/neuron|4006|daily|allocation|quota/i.test(mensaje)) {
+      return { estado: 429, error: 'Se alcanzó el límite gratuito diario de Cloudflare. Se renueva cada día a las 00:00 UTC.' };
+    }
+    return { estado: 502, error: 'No se pudo generar la voz de Cloudflare: ' + mensaje.slice(0, 200) };
+  }
+}
+
 /* ---------------- Imágenes (Workers AI de Cloudflare) ---------------- */
 
 var MODELO_IMAGEN = '@cf/black-forest-labs/flux-2-klein-4b';
@@ -246,6 +267,15 @@ export default {
     if (cuerpo.accion === 'voces') {
       var lista = await listarVoces(env.GEMINI_API_KEY);
       return responder(lista.datos, lista.estado, origen);
+    }
+
+    if (cuerpo.accion === 'voz-cloudflare') {
+      if (!env.AI) return responder({ error: 'Falta conectar Workers AI al Worker (conexión llamada AI en Settings → Bindings).' }, 500, origen);
+      var textoCF = typeof cuerpo.texto === 'string' ? cuerpo.texto.trim() : '';
+      if (!textoCF) return responder({ error: 'No hay texto para narrar' }, 400, origen);
+      if (textoCF.length > MAX_CARACTERES_VOZ) return responder({ error: 'El fragmento de narración es demasiado largo' }, 400, origen);
+      var vozCF = await generarVozCloudflare(env, textoCF);
+      return responder(vozCF.estado === 200 ? vozCF.datos : { error: vozCF.error }, vozCF.estado, origen);
     }
 
     if (cuerpo.accion === 'voz') {

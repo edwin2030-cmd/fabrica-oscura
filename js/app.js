@@ -865,6 +865,7 @@
     });
     grupos.push(['Voces básicas masculinas', lista.filter(function (v) { return !v.latina && v.genero === 'male'; })]);
     grupos.push(['Voces básicas femeninas', lista.filter(function (v) { return !v.latina && v.genero === 'female'; })]);
+    grupos.push(['Respaldo (si Gemini está al límite)', [Voz.VOZ_CLOUDFLARE]]);
 
     sel.innerHTML = grupos.filter(function (g) { return g[1].length; }).map(function (g) {
       return '<optgroup label="' + esc(g[0]) + '">' + g[1].map(function (v) {
@@ -909,7 +910,7 @@
   function vozElegida() {
     var id = document.getElementById('vozSelect').value;
     var lista = voces || Voz.VOCES_RESPALDO;
-    return lista.find(function (v) { return v.id === id; }) || Voz.VOCES_RESPALDO[0];
+    return lista.concat([Voz.VOZ_CLOUDFLARE]).find(function (v) { return v.id === id; }) || Voz.VOCES_RESPALDO[0];
   }
 
   function guardarEleccionVoz() {
@@ -986,7 +987,9 @@
       }).catch(function (err) { aviso(err.message, 'error'); });
       if (editor && editor.proyecto === proyecto) {
         mostrarAudio(audioVoz.url);
-        aviso('Audio listo: ' + formatoDuracion(a.duracion * PALABRAS_POR_MINUTO / 60) + ' min');
+        aviso(a.respaldo
+          ? 'Gemini llegó a su límite, así que se usó la voz de Cloudflare. Audio listo: ' + formatoDuracion(a.duracion * PALABRAS_POR_MINUTO / 60) + ' min'
+          : 'Audio listo: ' + formatoDuracion(a.duracion * PALABRAS_POR_MINUTO / 60) + ' min');
       }
     }, function (err) {
       aviso(err.message, 'error');

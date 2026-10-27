@@ -1,8 +1,8 @@
 /* ==========================================================
    Fábrica Oscura — intermediario seguro para Gemini
-   Se pega en un Worker de Cloudflare. La clave de Gemini NO
-   va aquí: se guarda en Cloudflare como secreto llamado
-   GEMINI_API_KEY.
+   (textos y voces). Se pega en un Worker de Cloudflare.
+   La clave de Gemini NO va aquí: se guarda en Cloudflare
+   como secreto llamado GEMINI_API_KEY.
    ========================================================== */
 
 // Páginas que pueden usar este intermediario.
@@ -57,6 +57,82 @@ function esPasajero(estado) {
   return estado === 429 || estado === 500 || estado === 503 || estado === 504;
 }
 
+/* ---------------- Voces (texto a voz) ---------------- */
+
+// Modelos de voz de Gemini con nivel gratuito, en orden de preferencia.
+var MODELOS_VOZ = [
+  'gemini-3.8-flash-tts',
+  'gemini-3.8-flash-lite-tts',
+  'gemini-3.1-flash-tts-preview'
+];
+var MAX_CARACTERES_VOZ = 3000;     // largo máximo de cada fragmento de narración
+var MAX_CARACTERES_ESTILO = 300;   // largo máximo de la indicación de estilo
+var TIEMPO_POR_VOZ = 80000;        // milisegundos máximos de espera por cada audio
+
+// Lista las voces de Gemini en español latinoamericano.
+async function listarVoces(clave) {
+  var url = 'https://generativelanguage.googleapis.com/v1beta/voices?page_size=300' +
+    ['es-419', 'es-MX', 'es-US', 'es-CO', 'es-AR', 'es-CL', 'es-PE', 'es-VE']
+      .map(function (c) { return '&language_code=' + c; }).join('');
+  try {
+    var respuesta = await fetch(url, { headers: { 'x-goog-api-key': clave }, signal: AbortSignal.timeout(TIEMPO_POR_INTENTO) });
+    var datos = await respuesta.json().catch(function () { return {}; });
+    if (!respuesta.ok) return { estado: respuesta.status, datos: { error: (datos.error && datos.error.message) || 'No se pudo obtener la lista de voces' } };
+    var voces = (datos.voices || []).map(function (v) {
+      return {
+        id: v.id || v.name || '',
+        nombre: v.display_name || v.displayName || v.id || '',
+        genero: v.gender || '',
+        acento: v.accent || '',
+        idioma: v.language_code || v.languageCode || '',
+        descripcion: (v.description || '').slice(0, 200)
+      };
+    }).filter(function (v) { return v.id; });
+    return { estado: 200, datos: { voces: voces } };
+  } catch (e) {
+    return { estado: 504, datos: { error: 'Gemini tardó demasiado en responder' } };
+  }
+}
+
+// Genera el audio de un fragmento. Si sale bien, devuelve la respuesta de
+// Google tal cual (sin abrirla), para no gastar el tiempo de proceso gratuito.
+async function generarVoz(texto, voz, estilo, clave) {
+  var contenido = { type: 'text', text: texto };
+  if (estilo) contenido.annotations = [{ type: 'speech_metadata', style: estilo }];
+
+  var ultimo = { estado: 503, error: 'Gemini no respondió' };
+  for (var i = 0; i < MODELOS_VOZ.length; i++) {
+    for (var intento = 0; intento < 2; intento++) {
+      var respuesta;
+      try {
+        respuesta = await fetch('https://generativelanguage.googleapis.com/v1beta/interactions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'x-goog-api-key': clave },
+          body: JSON.stringify({
+            model: MODELOS_VOZ[i],
+            input: [{ type: 'user_input', content: [contenido] }],
+            response_format: { type: 'audio' },
+            generation_config: { speech_config: [{ voice: voz }] }
+          }),
+          signal: AbortSignal.timeout(TIEMPO_POR_VOZ)
+        });
+      } catch (e) {
+        // Muy lento: no seguir probando, para no pasar el límite de espera de Cloudflare.
+        return { estado: 504, error: 'Gemini tardó demasiado en generar el audio' };
+      }
+      if (respuesta.ok) return { estado: 200, cuerpo: respuesta.body, modelo: MODELOS_VOZ[i] };
+
+      var datos = await respuesta.json().catch(function () { return {}; });
+      ultimo = { estado: respuesta.status, error: (datos.error && datos.error.message) || 'Gemini no respondió' };
+      if (!esPasajero(respuesta.status)) break;
+      if (intento === 0) await esperar(ESPERA_REINTENTO);
+    }
+    // Clave inválida o voz inexistente: otro modelo no lo arreglará.
+    if (ultimo.estado === 401 || ultimo.estado === 403) break;
+  }
+  return ultimo;
+}
+
 function cabecerasCors(origen) {
   return {
     'Access-Control-Allow-Origin': origen,
@@ -93,6 +169,26 @@ export default {
       cuerpo = await peticion.json();
     } catch (e) {
       return responder({ error: 'Pedido no válido' }, 400, origen);
+    }
+
+    if (cuerpo.accion === 'voces') {
+      var lista = await listarVoces(env.GEMINI_API_KEY);
+      return responder(lista.datos, lista.estado, origen);
+    }
+
+    if (cuerpo.accion === 'voz') {
+      var narracion = typeof cuerpo.texto === 'string' ? cuerpo.texto.trim() : '';
+      var voz = typeof cuerpo.voz === 'string' ? cuerpo.voz.trim() : '';
+      var estilo = typeof cuerpo.estilo === 'string' ? cuerpo.estilo.trim() : '';
+      if (!narracion) return responder({ error: 'No hay texto para narrar' }, 400, origen);
+      if (narracion.length > MAX_CARACTERES_VOZ) return responder({ error: 'El fragmento de narración es demasiado largo' }, 400, origen);
+      if (!/^[A-Za-z0-9._\/-]{1,120}$/.test(voz)) return responder({ error: 'Voz no válida' }, 400, origen);
+      if (estilo.length > MAX_CARACTERES_ESTILO) return responder({ error: 'La indicación de estilo es demasiado larga' }, 400, origen);
+
+      var audio = await generarVoz(narracion, voz, estilo, env.GEMINI_API_KEY);
+      if (audio.estado !== 200) return responder({ error: audio.error }, audio.estado, origen);
+      var cabeceras = Object.assign({ 'Content-Type': 'application/json; charset=utf-8', 'X-Modelo': audio.modelo }, cabecerasCors(origen));
+      return new Response(audio.cuerpo, { status: 200, headers: cabeceras });
     }
 
     var texto = typeof cuerpo.prompt === 'string' ? cuerpo.prompt.trim() : '';

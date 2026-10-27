@@ -336,6 +336,7 @@
         '<div class="features">' +
           '<div class="feature"><div class="feature-icon">💡</div><h3>Generador de ideas con IA</h3><p>Ideas nuevas con Gemini o al azar. Seis subgéneros: paranormal, psicológico, leyendas urbanas, misterios, folclore y grabaciones encontradas.</p></div>' +
           '<div class="feature"><div class="feature-icon">🎬</div><h3>Editor de escenas</h3><p>Reordena, duplica y elimina escenas. Calcula palabras y duración estimada de la narración.</p></div>' +
+          '<div class="feature"><div class="feature-icon">🎙️</div><h3>Voces con IA</h3><p>Convierte la narración en audio con voces masculinas y femeninas, escúchala y descárgala en MP3.</p></div>' +
           '<div class="feature"><div class="feature-icon">💾</div><h3>Guardado automático</h3><p>Tus proyectos se guardan solos en este navegador mientras escribes.</p></div>' +
           '<div class="feature"><div class="feature-icon">📱</div><h3>En cualquier pantalla</h3><p>Funciona en computadoras, tabletas y teléfonos.</p></div>' +
         '</div>' +
@@ -343,7 +344,7 @@
 
       '<section class="section roadmap">' +
         '<strong>Próximas etapas de la fábrica</strong> <span class="badge-soon">aún no disponibles</span>' +
-        '<ul><li>Guion completo con IA en un solo clic</li><li>Voz en off sintetizada</li><li>Imágenes y montaje del video</li></ul>' +
+        '<ul><li>Guion completo con IA en un solo clic</li><li>Imágenes y montaje del video</li></ul>' +
       '</section>';
   }
 
@@ -461,6 +462,23 @@
           '<label>Premisa / descripción<textarea data-field="descripcion" rows="5" placeholder="¿De qué trata la historia?">' + esc(p.descripcion) + '</textarea></label>' +
           '<div class="editor-stats" id="editorStats"></div>' +
           '<p class="hint">Duración estimada a ' + PALABRAS_POR_MINUTO + ' palabras por minuto de narración. Se guarda automáticamente.</p>' +
+          '<div class="voz-panel">' +
+            '<h2>🎙️ Voz y audio</h2>' +
+            '<label>Voz<select id="vozSelect"></select></label>' +
+            '<label>Estilo de narración<select id="vozEstilo"></select></label>' +
+            '<div class="voz-acciones">' +
+              '<button type="button" class="btn btn-sm" data-action="voz-probar">▶ Escuchar prueba</button>' +
+              '<button type="button" class="btn btn-sm btn-primary" data-action="voz-generar">🎙️ Generar audio de la historia</button>' +
+            '</div>' +
+            '<div id="vozProgreso" class="voz-progreso" hidden>' +
+              '<progress max="1" value="0"></progress>' +
+              '<p class="hint" id="vozMensaje"></p>' +
+              '<button type="button" class="btn btn-sm btn-ghost" data-action="voz-cancelar">Cancelar</button>' +
+            '</div>' +
+            '<audio id="vozAudio" controls preload="metadata" hidden></audio>' +
+            '<button type="button" class="btn btn-sm" data-action="voz-descargar" hidden>⬇ Descargar MP3</button>' +
+            '<p class="hint">La voz lee la narración de todas las escenas, en orden. El audio no se guarda: descárgalo antes de cerrar la página.</p>' +
+          '</div>' +
         '</aside>' +
         '<section>' +
           '<div class="scenes-head"><h2>Escenas</h2>' +
@@ -471,6 +489,7 @@
       '</div>';
 
     pintarEscenas();
+    prepararPanelVoz();
   }
 
   function pintarEscenas() {
@@ -643,6 +662,206 @@
     });
   }
 
+  /* ---------------- Voces ---------------- */
+
+  var voces = null;        // lista cargada una vez por visita
+  var cargandoVoces = null;
+  var vozOcupada = false;
+  var vozCancelada = false;
+  var audioVoz = null;     // { proyectoId, muestras, frecuencia, url, mp3 }
+  var audioPrueba = null;  // URL de la última prueba
+
+  // Google nombra sus voces en inglés; aquí se traducen para que se entiendan.
+  var TIPOS_VOZ = {
+    'Authoritative Advisor': 'Asesor serio',
+    'Digital Assistant': 'Asistente',
+    'Commercial Voiceover': 'Locutor comercial',
+    'Training Voiceover': 'Locutor de cursos',
+    'Podcaster': 'Podcaster',
+    'Tech Advisor': 'Asesor técnico',
+    'Tutor': 'Tutor',
+    'Concierge': 'Recepcionista',
+    'Call Center Agent': 'Agente telefónico'
+  };
+
+  function paisVoz(v) {
+    var t = (v.acento || '') + ' ' + (v.descripcion || '');
+    if (/mexic/i.test(t)) return 'México';
+    if (/argentin/i.test(t)) return 'Argentina';
+    if (/colombi/i.test(t)) return 'Colombia';
+    if (/chile/i.test(t)) return 'Chile';
+    if (/peru|perú/i.test(t)) return 'Perú';
+    if (/venezol/i.test(t)) return 'Venezuela';
+    return 'Latinoamérica';
+  }
+
+  function etiquetaVoz(v) {
+    if (!v.latina) return v.nombre + ' — ' + v.descripcion;
+    var nombre = v.nombre.replace(/^(.*?)(\s+\d+)?$/, function (_, tipo, num) {
+      return (TIPOS_VOZ[tipo] || tipo) + (num || '');
+    });
+    var edad = /(\d{2})-year-old/.exec(v.descripcion || '');
+    return nombre + (edad ? ' · ' + edad[1] + ' años' : '');
+  }
+
+  function pintarSelectVoces() {
+    var sel = document.getElementById('vozSelect');
+    if (!sel) return;
+    var pref = Voz.leerPreferencias();
+    var lista = voces || Voz.VOCES_RESPALDO;
+    var latinas = lista.filter(function (v) { return v.latina && (v.genero === 'male' || v.genero === 'female'); });
+    var paises = [];
+    latinas.forEach(function (v) { if (paises.indexOf(paisVoz(v)) === -1) paises.push(paisVoz(v)); });
+    paises.sort(function (a, b) { return (a === 'México' ? -1 : 0) - (b === 'México' ? -1 : 0); });
+
+    var grupos = [];
+    paises.forEach(function (pais) {
+      [['male', 'masculinas'], ['female', 'femeninas']].forEach(function (g) {
+        grupos.push([pais + ' — voces ' + g[1], latinas.filter(function (v) { return paisVoz(v) === pais && v.genero === g[0]; })]);
+      });
+    });
+    grupos.push(['Voces básicas masculinas', lista.filter(function (v) { return !v.latina && v.genero === 'male'; })]);
+    grupos.push(['Voces básicas femeninas', lista.filter(function (v) { return !v.latina && v.genero === 'female'; })]);
+
+    sel.innerHTML = grupos.filter(function (g) { return g[1].length; }).map(function (g) {
+      return '<optgroup label="' + esc(g[0]) + '">' + g[1].map(function (v) {
+        return '<option value="' + esc(v.id) + '"' + (v.id === pref.voz ? ' selected' : '') +
+          ' title="' + esc(v.descripcion) + '">' + esc(etiquetaVoz(v)) + '</option>';
+      }).join('') + '</optgroup>';
+    }).join('');
+  }
+
+  function prepararPanelVoz() {
+    var pref = Voz.leerPreferencias();
+    document.getElementById('vozEstilo').innerHTML = Object.keys(Voz.ESTILOS).map(function (k) {
+      return '<option value="' + esc(k) + '"' + (k === pref.estilo ? ' selected' : '') + '>' + esc(Voz.ESTILOS[k].nombre) + '</option>';
+    }).join('');
+    pintarSelectVoces();
+    if (!voces && !cargandoVoces && location.protocol !== 'file:') {
+      cargandoVoces = Voz.cargarVoces().then(function (lista) {
+        voces = lista;
+        pintarSelectVoces();
+      });
+    }
+    // Si ya se generó el audio de este proyecto en esta visita, se vuelve a mostrar.
+    if (audioVoz && editor && audioVoz.proyectoId === editor.proyecto.id) mostrarAudio(audioVoz.url);
+  }
+
+  function vozElegida() {
+    var id = document.getElementById('vozSelect').value;
+    var lista = voces || Voz.VOCES_RESPALDO;
+    return lista.find(function (v) { return v.id === id; }) || Voz.VOCES_RESPALDO[0];
+  }
+
+  function guardarEleccionVoz() {
+    Voz.guardarPreferencias({ voz: document.getElementById('vozSelect').value, estilo: document.getElementById('vozEstilo').value });
+  }
+
+  function marcarVozOcupada(ocupada) {
+    vozOcupada = ocupada;
+    Array.prototype.forEach.call(document.querySelectorAll('[data-action="voz-probar"], [data-action="voz-generar"], #vozSelect, #vozEstilo'), function (b) {
+      b.disabled = ocupada;
+    });
+  }
+
+  function mostrarProgreso(fraccion, mensaje) {
+    var caja = document.getElementById('vozProgreso');
+    if (!caja) return;
+    caja.hidden = fraccion === null;
+    if (fraccion === null) return;
+    caja.querySelector('progress').value = fraccion;
+    document.getElementById('vozMensaje').textContent = mensaje;
+  }
+
+  function mostrarAudio(url) {
+    var reproductor = document.getElementById('vozAudio');
+    if (!reproductor) return;
+    reproductor.src = url;
+    reproductor.hidden = false;
+    document.querySelector('[data-action="voz-descargar"]').hidden = false;
+  }
+
+  function probarVoz(boton) {
+    if (vozOcupada) return;
+    guardarEleccionVoz();
+    var texto = boton.textContent;
+    marcarVozOcupada(true);
+    boton.textContent = '⏳ Generando prueba…';
+    Voz.probar(vozElegida(), document.getElementById('vozEstilo').value).then(function (blob) {
+      if (audioPrueba) URL.revokeObjectURL(audioPrueba);
+      audioPrueba = URL.createObjectURL(blob);
+      new Audio(audioPrueba).play().catch(function () {
+        aviso('El navegador bloqueó la reproducción. Pulsa otra vez "Escuchar prueba".', 'error');
+      });
+    }, function (err) {
+      aviso(err.message, 'error');
+    }).finally(function () {
+      boton.textContent = texto;
+      marcarVozOcupada(false);
+    });
+  }
+
+  function generarAudio() {
+    if (vozOcupada || !editor) return;
+    guardarPendiente();
+    guardarEleccionVoz();
+    var proyecto = editor.proyecto;
+    vozCancelada = false;
+    marcarVozOcupada(true);
+    mostrarProgreso(0, 'Preparando…');
+
+    Voz.narrarProyecto(proyecto, vozElegida(), document.getElementById('vozEstilo').value, function (p) {
+      if (editor && editor.proyecto === proyecto) mostrarProgreso(p.hecho / p.total, p.mensaje);
+    }, function () { return vozCancelada; }).then(function (a) {
+      if (audioVoz) URL.revokeObjectURL(audioVoz.url);
+      audioVoz = { proyectoId: proyecto.id, muestras: a.muestras, frecuencia: a.frecuencia, url: URL.createObjectURL(Voz.aWav(a.muestras, a.frecuencia)), mp3: null };
+      if (editor && editor.proyecto === proyecto) {
+        mostrarAudio(audioVoz.url);
+        aviso('Audio listo: ' + formatoDuracion(a.duracion * PALABRAS_POR_MINUTO / 60) + ' min');
+      }
+    }, function (err) {
+      aviso(err.message, 'error');
+    }).finally(function () {
+      mostrarProgreso(null);
+      marcarVozOcupada(false);
+    });
+  }
+
+  function descargarMp3(boton) {
+    if (!audioVoz || vozOcupada) return;
+    var proyecto = obtenerProyecto(audioVoz.proyectoId);
+    var nombre = nombreArchivo(proyecto ? proyecto.titulo : 'narracion').replace(/\.txt$/, '.mp3');
+    var bajar = function (blob) {
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement('a');
+      a.href = url;
+      a.download = nombre;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+    };
+    if (audioVoz.mp3) { bajar(audioVoz.mp3); return; }
+
+    marcarVozOcupada(true);
+    boton.disabled = true;
+    mostrarProgreso(0, 'Convirtiendo a MP3…');
+    var actual = audioVoz;
+    Voz.aMp3(actual.muestras, actual.frecuencia, function (f) {
+      mostrarProgreso(f, 'Convirtiendo a MP3… ' + Math.round(f * 100) + '%');
+    }).then(function (blob) {
+      actual.mp3 = blob;
+      bajar(blob);
+      aviso('MP3 descargado');
+    }, function (err) {
+      aviso(err.message, 'error');
+    }).finally(function () {
+      boton.disabled = false;
+      mostrarProgreso(null);
+      marcarVozOcupada(false);
+    });
+  }
+
   /* ---------------- Navegación ---------------- */
 
   function ruta() {
@@ -701,6 +920,13 @@
         break;
       case 'generar-idea-ia': generarIdeaIA(boton); break;
       case 'narracion-ia': narracionIA(boton); break;
+      case 'voz-probar': probarVoz(boton); break;
+      case 'voz-generar': generarAudio(); break;
+      case 'voz-cancelar':
+        vozCancelada = true;
+        mostrarProgreso(0, 'Cancelando al terminar la parte actual…');
+        break;
+      case 'voz-descargar': descargarMp3(boton); break;
       case 'copiar-idea':
         copiarTexto(Ideas.comoTexto(ideaActual)).then(function (ok) {
           aviso(ok ? 'Idea copiada al portapapeles' : 'No se pudo copiar la idea', ok ? '' : 'error');
@@ -737,6 +963,7 @@
       return;
     }
     if (!editor) return;
+    if (t.id === 'vozSelect' || t.id === 'vozEstilo') { guardarEleccionVoz(); return; }
 
     var campo = t.getAttribute('data-field');
     if (campo) {

@@ -234,14 +234,23 @@ var Voz = (function () {
     });
   }
 
+  // Si el modelo de voz disponible no acepta la indicación de estilo, se deja de enviar
+  // durante esta visita a la página (la voz elegida se mantiene).
+  var estiloNoAdmitido = false;
+
   // Un fragmento de texto → muestras de audio. Si se alcanza el límite por minuto, espera y reintenta.
   function sintetizar(texto, voz, estilo, alEsperar, intento) {
     intento = intento || 0;
-    return enviar({ accion: 'voz', texto: texto, voz: voz.id, estilo: textoEstilo(estilo, voz) }).then(function (datos) {
+    var conEstilo = !estiloNoAdmitido;
+    return enviar({ accion: 'voz', texto: texto, voz: voz.id, estilo: conEstilo ? textoEstilo(estilo, voz) : '' }).then(function (datos) {
       var b64 = buscarAudio(datos);
       if (!b64) throw new Error('Gemini no devolvió audio. Intenta de nuevo.');
       return leerPCM(base64ABytes(b64));
     }, function (err) {
+      if (conEstilo && err.estado === 400 && /speech metadata|not supported/i.test(err.message)) {
+        estiloNoAdmitido = true;
+        return sintetizar(texto, voz, estilo, alEsperar, intento);
+      }
       if (err.estado === 429 && intento < REINTENTOS_POR_LIMITE) {
         return esperar(ESPERA_POR_LIMITE, alEsperar).then(function () {
           return sintetizar(texto, voz, estilo, alEsperar, intento + 1);

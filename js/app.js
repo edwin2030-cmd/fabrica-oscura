@@ -334,7 +334,7 @@
 
       '<section class="section">' +
         '<div class="features">' +
-          '<div class="feature"><div class="feature-icon">💡</div><h3>Generador de ideas</h3><p>Seis subgéneros: paranormal, psicológico, leyendas urbanas, misterios, folclore y grabaciones encontradas.</p></div>' +
+          '<div class="feature"><div class="feature-icon">💡</div><h3>Generador de ideas con IA</h3><p>Ideas nuevas con Gemini o al azar. Seis subgéneros: paranormal, psicológico, leyendas urbanas, misterios, folclore y grabaciones encontradas.</p></div>' +
           '<div class="feature"><div class="feature-icon">🎬</div><h3>Editor de escenas</h3><p>Reordena, duplica y elimina escenas. Calcula palabras y duración estimada de la narración.</p></div>' +
           '<div class="feature"><div class="feature-icon">💾</div><h3>Guardado automático</h3><p>Tus proyectos se guardan solos en este navegador mientras escribes.</p></div>' +
           '<div class="feature"><div class="feature-icon">📱</div><h3>En cualquier pantalla</h3><p>Funciona en computadoras, tabletas y teléfonos.</p></div>' +
@@ -343,7 +343,7 @@
 
       '<section class="section roadmap">' +
         '<strong>Próximas etapas de la fábrica</strong> <span class="badge-soon">aún no disponibles</span>' +
-        '<ul><li>Generación de guiones con IA</li><li>Voz en off sintetizada</li><li>Imágenes y montaje del video</li></ul>' +
+        '<ul><li>Guion completo con IA en un solo clic</li><li>Voz en off sintetizada</li><li>Imágenes y montaje del video</li></ul>' +
       '</section>';
   }
 
@@ -395,10 +395,11 @@
       '<div class="ideas-controls">' +
         '<label>Subgénero<select id="subgeneroIdeas"><option value="todos">Cualquiera (sorpresa)</option>' +
           opciones(Ideas.SUBGENEROS, subgeneroIdeas) + '</select></label>' +
-        '<button type="button" class="btn btn-primary" data-action="generar-idea">🎲 Generar otra idea</button>' +
+        '<button type="button" class="btn btn-primary" data-action="generar-idea-ia">✨ Generar con IA</button>' +
+        '<button type="button" class="btn" data-action="generar-idea">🎲 Idea al azar</button>' +
       '</div>' +
       '<div id="tarjetaIdea"></div>' +
-      '<p class="note">ℹ️ Este generador no usa inteligencia artificial: mezcla elementos escritos a mano. Úsalo como punto de partida y dale tu propio estilo.</p>';
+      '<p class="note">ℹ️ <strong>✨ Generar con IA</strong> le pide a Gemini una idea nueva (tarda unos segundos). <strong>🎲 Idea al azar</strong> mezcla elementos escritos a mano y es instantáneo.</p>';
     pintarIdea();
   }
 
@@ -407,7 +408,8 @@
     document.getElementById('tarjetaIdea').innerHTML = '' +
       '<article class="idea-card">' +
         '<div class="tags"><span class="tag tag-estado-publicado">' + esc(nombreSubgenero(i.subgenero)) + '</span>' +
-          '<span class="tag">⏱ ' + esc(i.duracion) + '</span></div>' +
+          (i.duracion ? '<span class="tag">⏱ ' + esc(i.duracion) + '</span>' : '') +
+          (i.ia ? '<span class="tag">✨ Creada con IA</span>' : '') + '</div>' +
         '<h2 class="idea-title">' + esc(i.titulo) + '</h2>' +
         '<div class="idea-fields">' +
           '<div class="idea-field idea-field-wide"><h3>Premisa</h3><p>' + esc(i.premisa) + '</p></div>' +
@@ -420,7 +422,8 @@
         '<div class="idea-actions">' +
           '<button type="button" class="btn btn-primary" data-action="usar-idea">Crear proyecto con esta idea</button>' +
           '<button type="button" class="btn" data-action="copiar-idea">Copiar idea</button>' +
-          '<button type="button" class="btn btn-ghost" data-action="generar-idea">🎲 Otra</button>' +
+          '<button type="button" class="btn btn-ghost" data-action="generar-idea-ia">✨ Otra con IA</button>' +
+          '<button type="button" class="btn btn-ghost" data-action="generar-idea">🎲 Otra al azar</button>' +
         '</div>' +
       '</article>';
   }
@@ -490,6 +493,7 @@
                 '<button type="button" class="btn btn-icon btn-danger-ghost" data-action="eliminar-escena" title="Eliminar" aria-label="Eliminar escena">✕</button>' +
               '</div>' +
             '</div>' +
+            '<div class="scene-ai"><button type="button" class="btn btn-sm" data-action="narracion-ia">✨ Escribir narración con IA</button></div>' +
             '<label>Narración (voz en off)<textarea data-sfield="narracion" rows="5" placeholder="Lo que dirá el narrador en esta escena…">' + esc(e.narracion) + '</textarea></label>' +
             '<div class="scene-grid">' +
               '<label>Visual / imágenes<textarea data-sfield="visual" rows="3" placeholder="Qué se ve en pantalla…">' + esc(e.visual) + '</textarea></label>' +
@@ -574,6 +578,71 @@
     }
   }
 
+  /* ---------------- Inteligencia artificial ---------------- */
+
+  var iaOcupada = false;
+
+  // Desactiva los botones de IA mientras Gemini trabaja, para no enviar pedidos repetidos.
+  function marcarIaOcupada(ocupada, botonActivo) {
+    iaOcupada = ocupada;
+    Array.prototype.forEach.call(document.querySelectorAll('[data-action$="-ia"]'), function (b) {
+      b.disabled = ocupada;
+    });
+    if (botonActivo) {
+      if (ocupada) {
+        botonActivo.setAttribute('data-texto', botonActivo.textContent);
+        botonActivo.textContent = '⏳ Generando…';
+      } else if (botonActivo.getAttribute('data-texto')) {
+        botonActivo.textContent = botonActivo.getAttribute('data-texto');
+      }
+    }
+  }
+
+  function generarIdeaIA(boton) {
+    if (iaOcupada) return;
+    marcarIaOcupada(true, boton);
+    IA.generarIdea(subgeneroIdeas).then(function (idea) {
+      ideaActual = idea;
+      if (ruta().vista === 'ideas') pintarIdea();
+      aviso('Idea creada con IA');
+    }, function (err) {
+      aviso(err.message, 'error');
+    }).finally(function () {
+      marcarIaOcupada(false, boton);
+    });
+  }
+
+  function narracionIA(boton) {
+    if (iaOcupada || !editor) return;
+    var i = indiceEscena(boton);
+    if (i < 0) return;
+    var proyecto = editor.proyecto;
+    var idEscena = proyecto.escenas[i].id;
+
+    var seguir = proyecto.escenas[i].narracion.trim()
+      ? confirmar('¿Reescribir la narración?', 'Gemini usará el texto actual como borrador y lo reemplazará por una versión nueva.', 'Reescribir')
+      : Promise.resolve(true);
+
+    seguir.then(function (ok) {
+      if (!ok) return;
+      marcarIaOcupada(true, boton);
+      return IA.escribirNarracion(proyecto, i).then(function (texto) {
+        // El usuario pudo cambiar de pantalla o borrar la escena mientras esperaba.
+        if (!editor || editor.proyecto !== proyecto) return;
+        var escena = proyecto.escenas.find(function (e) { return e.id === idEscena; });
+        if (!escena) return;
+        escena.narracion = texto;
+        cambioEnEditor();
+        pintarEscenas();
+        aviso('Narración escrita con IA');
+      }, function (err) {
+        aviso(err.message, 'error');
+      }).finally(function () {
+        marcarIaOcupada(false, boton);
+      });
+    });
+  }
+
   /* ---------------- Navegación ---------------- */
 
   function ruta() {
@@ -630,6 +699,8 @@
         ideaActual = Ideas.generar(subgeneroIdeas);
         pintarIdea();
         break;
+      case 'generar-idea-ia': generarIdeaIA(boton); break;
+      case 'narracion-ia': narracionIA(boton); break;
       case 'copiar-idea':
         copiarTexto(Ideas.comoTexto(ideaActual)).then(function (ok) {
           aviso(ok ? 'Idea copiada al portapapeles' : 'No se pudo copiar la idea', ok ? '' : 'error');

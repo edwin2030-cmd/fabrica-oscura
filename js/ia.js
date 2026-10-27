@@ -1,0 +1,129 @@
+/* ==========================================================
+   Conexión con Gemini a través del intermediario de Cloudflare.
+   Aquí NO hay ninguna clave: la clave vive como secreto en
+   Cloudflare. Solo funciona desde la página publicada en
+   GitHub Pages (el intermediario rechaza otros orígenes).
+   ========================================================== */
+
+var IA = (function () {
+  'use strict';
+
+  var URL_INTERMEDIARIO = 'https://fabricadvideos.d-e-knovacore.workers.dev/';
+  var TIEMPO_MAXIMO = 90000; // 90 segundos
+
+  // Convierte los errores técnicos en mensajes fáciles de entender.
+  function mensajeDeError(estado, texto) {
+    texto = texto || '';
+    if (estado === 503 || /demand|overloaded|unavailable/i.test(texto)) {
+      return 'Gemini está muy ocupado ahora mismo. Intenta de nuevo en unos minutos.';
+    }
+    if (estado === 429 || /quota|rate/i.test(texto)) {
+      return 'Se alcanzó el límite gratuito de Gemini. Vuelve a intentarlo más tarde o mañana.';
+    }
+    if (estado === 524 || estado === 504) {
+      return 'Gemini tardó demasiado en responder. Intenta de nuevo.';
+    }
+    return 'No se pudo generar el texto: ' + (texto || 'error desconocido') + '.';
+  }
+
+  function pedir(prompt) {
+    if (location.protocol === 'file:') {
+      return Promise.reject(new Error('La IA solo funciona desde tu página publicada en GitHub Pages, no abriendo el archivo en tu computadora.'));
+    }
+    var control = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    var temporizador = control ? setTimeout(function () { control.abort(); }, TIEMPO_MAXIMO) : null;
+
+    return fetch(URL_INTERMEDIARIO, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt: prompt }),
+      signal: control ? control.signal : undefined
+    }).then(function (r) {
+      return r.json().catch(function () { return {}; }).then(function (datos) {
+        if (!r.ok || datos.error) throw new Error(mensajeDeError(r.status, datos.error));
+        if (!datos.texto || !datos.texto.trim()) throw new Error('Gemini respondió vacío. Intenta de nuevo.');
+        return datos.texto.trim();
+      });
+    }, function (e) {
+      if (e && e.name === 'AbortError') throw new Error(mensajeDeError(524));
+      throw new Error('No se pudo conectar con el intermediario. Revisa tu conexión a internet.');
+    }).finally(function () {
+      if (temporizador) clearTimeout(temporizador);
+    });
+  }
+
+  // Extrae el primer objeto JSON de la respuesta (Gemini a veces añade ```json).
+  function leerJSON(texto) {
+    var inicio = texto.indexOf('{');
+    var fin = texto.lastIndexOf('}');
+    if (inicio === -1 || fin <= inicio) throw new Error('Gemini no respondió en el formato esperado. Intenta de nuevo.');
+    try {
+      return JSON.parse(texto.slice(inicio, fin + 1));
+    } catch (e) {
+      throw new Error('Gemini no respondió en el formato esperado. Intenta de nuevo.');
+    }
+  }
+
+  function generarIdea(subgenero) {
+    var claves = Object.keys(Ideas.SUBGENEROS);
+    var clave = Ideas.SUBGENEROS[subgenero] ? subgenero : claves[Math.floor(Math.random() * claves.length)];
+
+    var prompt = [
+      'Eres guionista de un canal de YouTube en español de historias de terror y misterio.',
+      'Inventa una idea ORIGINAL para un video del subgénero "' + Ideas.SUBGENEROS[clave] + '".',
+      'Evita clichés gastados y no copies historias, películas ni creepypastas conocidas.',
+      'Responde SOLO con un objeto JSON válido, sin texto antes ni después, con estas claves (todas en español):',
+      '{',
+      '  "titulo": "título corto y llamativo para YouTube",',
+      '  "protagonista": "quién es el protagonista, en una frase",',
+      '  "lugar": "dónde ocurre, en una frase",',
+      '  "premisa": "de qué trata la historia, en dos o tres frases",',
+      '  "giro": "giro final sorprendente, en una o dos frases",',
+      '  "gancho": "frase del narrador para los primeros 15 segundos que atrape al espectador",',
+      '  "tono": "tono y ritmo de la narración, en una frase",',
+      '  "duracion": "duración sugerida, por ejemplo 10 a 12 minutos"',
+      '}'
+    ].join('\n');
+
+    return pedir(prompt).then(function (texto) {
+      var d = leerJSON(texto);
+      var idea = { subgenero: clave, ia: true };
+      ['titulo', 'protagonista', 'lugar', 'premisa', 'giro', 'gancho', 'tono', 'duracion'].forEach(function (k) {
+        idea[k] = typeof d[k] === 'string' ? d[k].trim() : '';
+      });
+      if (!idea.titulo || !idea.premisa) throw new Error('Gemini no respondió en el formato esperado. Intenta de nuevo.');
+      return idea;
+    });
+  }
+
+  // Escribe la narración (voz en off) de una escena usando el contexto del proyecto.
+  function escribirNarracion(proyecto, indice) {
+    var escenas = proyecto.escenas;
+    var e = escenas[indice];
+    var anterior = indice > 0 ? escenas[indice - 1].narracion.trim() : '';
+
+    var partes = [
+      'Eres el narrador de un canal de YouTube en español de historias de terror y misterio.',
+      'Escribe SOLO el texto de la narración (voz en off) de UNA escena del guion.',
+      'Sin títulos, sin acotaciones, sin indicaciones de cámara ni de sonido, sin comillas alrededor.',
+      'Unas 150 a 250 palabras, frases claras para leer en voz alta, con tensión y atmósfera.',
+      '',
+      'Título del video: ' + proyecto.titulo,
+      'Subgénero: ' + (Ideas.SUBGENEROS[proyecto.subgenero] || 'terror'),
+      'Premisa del video: ' + (proyecto.descripcion.trim() || '(sin premisa)'),
+      '',
+      'Esta es la escena ' + (indice + 1) + ' de ' + escenas.length + '.',
+      'Título de la escena: ' + (e.titulo.trim() || '(sin título)')
+    ];
+    if (e.notas.trim()) partes.push('Notas del guionista para esta escena: ' + e.notas.trim());
+    if (e.narracion.trim()) partes.push('Borrador actual (mejóralo y amplíalo): ' + e.narracion.trim().slice(0, 1200));
+    if (anterior) partes.push('', 'Narración de la escena anterior (continúa desde aquí sin repetirla): ' + anterior.slice(-1000));
+
+    return pedir(partes.join('\n').slice(0, 3900));
+  }
+
+  return {
+    generarIdea: generarIdea,
+    escribirNarracion: escribirNarracion
+  };
+})();

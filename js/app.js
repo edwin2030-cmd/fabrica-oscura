@@ -344,7 +344,7 @@
 
       '<section class="section roadmap">' +
         '<strong>Próximas etapas de la fábrica</strong> <span class="badge-soon">aún no disponibles</span>' +
-        '<ul><li>Guion completo con IA en un solo clic</li><li>Imágenes y montaje del video</li></ul>' +
+        '<ul><li>Imágenes y montaje del video</li></ul>' +
       '</section>';
   }
 
@@ -483,6 +483,15 @@
         '<section>' +
           '<div class="scenes-head"><h2>Escenas</h2>' +
             '<button type="button" class="btn btn-sm" data-action="agregar-escena">+ Añadir escena</button></div>' +
+          '<div class="guion-ia">' +
+            '<label>Duración objetivo<select id="duracionObjetivo">' +
+              [5, 8, 10, 12, 15].map(function (m) {
+                return '<option value="' + m + '"' + (m === duracionObjetivo ? ' selected' : '') + '>' + m + ' minutos</option>';
+              }).join('') +
+            '</select></label>' +
+            '<button type="button" class="btn btn-primary" data-action="guion-completo">✍️ Escribir guion completo con IA</button>' +
+            '<p class="hint" id="guionMensaje">Escribe la narración de todas las escenas, una tras otra, con el largo necesario para la duración elegida.</p>' +
+          '</div>' +
           '<div class="scene-list" id="listaEscenas"></div>' +
           '<button type="button" class="btn add-scene-big" data-action="agregar-escena">+ Añadir escena al final</button>' +
         '</section>' +
@@ -631,6 +640,80 @@
     });
   }
 
+  var duracionObjetivo = 10;     // minutos
+  var guionDetenido = false;
+
+  // Palabras por escena para llegar a la duración elegida.
+  function palabrasPorEscena(proyecto) {
+    return duracionObjetivo * PALABRAS_POR_MINUTO / Math.max(1, proyecto.escenas.length);
+  }
+
+  function guionCompletoIA(boton) {
+    if (!editor) return;
+    if (boton.getAttribute('data-corriendo')) {   // segundo clic: detener
+      guionDetenido = true;
+      boton.textContent = '⏳ Deteniendo al terminar la escena actual…';
+      return;
+    }
+    if (iaOcupada) return;
+    var proyecto = editor.proyecto;
+    if (!proyecto.escenas.length) { aviso('Añade al menos una escena primero.', 'error'); return; }
+
+    var tieneTexto = proyecto.escenas.some(function (e) { return e.narracion.trim(); });
+    var seguir = tieneTexto
+      ? confirmar('¿Escribir el guion completo?', 'Gemini reescribirá la narración de las ' + proyecto.escenas.length +
+          ' escenas usando el texto actual como base. Puede tardar varios minutos.', 'Escribir')
+      : Promise.resolve(true);
+
+    seguir.then(function (ok) {
+      if (!ok) return;
+      var ids = proyecto.escenas.map(function (e) { return e.id; });
+      var palabras = palabrasPorEscena(proyecto);
+      var mensaje = function (t) { var el = document.getElementById('guionMensaje'); if (el) el.textContent = t; };
+      var botonActual = function () { return document.querySelector('[data-action="guion-completo"]'); };
+      guionDetenido = false;
+      marcarIaOcupada(true);
+      boton.setAttribute('data-corriendo', '1');
+      boton.disabled = false;
+      boton.textContent = '⏹ Detener';
+      var k = 0;
+
+      function siguiente() {
+        if (!editor || editor.proyecto !== proyecto) return Promise.resolve('salio');
+        if (guionDetenido) return Promise.resolve('detenido');
+        if (k >= ids.length) return Promise.resolve('listo');
+        var i = proyecto.escenas.findIndex(function (e) { return e.id === ids[k]; });
+        if (i < 0) { k++; return siguiente(); }   // escena borrada mientras tanto
+        mensaje('⏳ Escribiendo escena ' + (k + 1) + ' de ' + ids.length + '… (cada una puede tardar hasta un minuto)');
+        return IA.escribirNarracion(proyecto, i, palabras).then(function (texto) {
+          if (!editor || editor.proyecto !== proyecto) return 'salio';
+          var escena = proyecto.escenas.find(function (e) { return e.id === ids[k]; });
+          if (escena) escena.narracion = texto;
+          cambioEnEditor();
+          pintarEscenas();
+          k++;
+          return siguiente();
+        });
+      }
+
+      siguiente().then(function (fin) {
+        if (fin === 'listo') aviso('Guion completo escrito: ' + estadisticas(proyecto).duracion + ' min estimados');
+        else if (fin === 'detenido') aviso('Guion detenido. Se guardaron las escenas ya escritas.');
+        mensaje(fin === 'listo' ? '✅ Guion listo. Ya puedes generar el audio.' : 'Escribe la narración de todas las escenas, una tras otra.');
+      }, function (err) {
+        aviso(err.message + ' Se guardaron las escenas ya escritas.', 'error');
+        mensaje('Se detuvo en la escena ' + (k + 1) + '. Pulsa el botón otra vez para reintentar.');
+      }).finally(function () {
+        var b = botonActual();
+        if (b) {
+          b.removeAttribute('data-corriendo');
+          b.textContent = '✍️ Escribir guion completo con IA';
+        }
+        marcarIaOcupada(false);
+      });
+    });
+  }
+
   function narracionIA(boton) {
     if (iaOcupada || !editor) return;
     var i = indiceEscena(boton);
@@ -645,7 +728,7 @@
     seguir.then(function (ok) {
       if (!ok) return;
       marcarIaOcupada(true, boton);
-      return IA.escribirNarracion(proyecto, i).then(function (texto) {
+      return IA.escribirNarracion(proyecto, i, palabrasPorEscena(proyecto)).then(function (texto) {
         // El usuario pudo cambiar de pantalla o borrar la escena mientras esperaba.
         if (!editor || editor.proyecto !== proyecto) return;
         var escena = proyecto.escenas.find(function (e) { return e.id === idEscena; });
@@ -920,6 +1003,7 @@
         break;
       case 'generar-idea-ia': generarIdeaIA(boton); break;
       case 'narracion-ia': narracionIA(boton); break;
+      case 'guion-completo': guionCompletoIA(boton); break;
       case 'voz-probar': probarVoz(boton); break;
       case 'voz-generar': generarAudio(); break;
       case 'voz-cancelar':
@@ -964,6 +1048,7 @@
     }
     if (!editor) return;
     if (t.id === 'vozSelect' || t.id === 'vozEstilo') { guardarEleccionVoz(); return; }
+    if (t.id === 'duracionObjetivo') { duracionObjetivo = Number(t.value) || 10; return; }
 
     var campo = t.getAttribute('data-field');
     if (campo) {

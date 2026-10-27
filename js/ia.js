@@ -97,16 +97,21 @@ var IA = (function () {
   }
 
   // Escribe la narración (voz en off) de una escena usando el contexto del proyecto.
-  function escribirNarracion(proyecto, indice) {
+  // palabras: largo aproximado deseado (por defecto, unas 200).
+  function escribirNarracion(proyecto, indice, palabras) {
     var escenas = proyecto.escenas;
     var e = escenas[indice];
     var anterior = indice > 0 ? escenas[indice - 1].narracion.trim() : '';
+    var objetivo = Math.max(80, Math.min(700, Math.round(palabras || 200)));
+    var esUltima = indice === escenas.length - 1;
 
     var partes = [
       'Eres el narrador de un canal de YouTube en español de historias de terror y misterio.',
       'Escribe SOLO el texto de la narración (voz en off) de UNA escena del guion.',
       'Sin títulos, sin acotaciones, sin indicaciones de cámara ni de sonido, sin comillas alrededor.',
-      'Unas 150 a 250 palabras, frases claras para leer en voz alta, con tensión y atmósfera.',
+      'Largo: unas ' + objetivo + ' palabras (entre ' + Math.round(objetivo * 0.85) + ' y ' + Math.round(objetivo * 1.15) + '). Es importante respetar ese largo.',
+      'Frases claras para leer en voz alta, con tensión, atmósfera y detalles concretos.',
+      esUltima ? 'Es la última escena: cierra la historia con un final inquietante.' : 'No cierres la historia todavía: termina dejando tensión para la siguiente escena.',
       '',
       'Título del video: ' + proyecto.titulo,
       'Subgénero: ' + (Ideas.SUBGENEROS[proyecto.subgenero] || 'terror'),
@@ -116,7 +121,7 @@ var IA = (function () {
       'Título de la escena: ' + (e.titulo.trim() || '(sin título)')
     ];
     if (e.notas.trim()) partes.push('Notas del guionista para esta escena: ' + e.notas.trim());
-    if (e.narracion.trim()) partes.push('Borrador actual (mejóralo y amplíalo): ' + e.narracion.trim().slice(0, 1200));
+    if (e.narracion.trim()) partes.push('Borrador actual (úsalo como base, mejóralo y amplíalo hasta el largo pedido): ' + e.narracion.trim().slice(0, 1200));
     if (anterior) partes.push('', 'Narración de la escena anterior (continúa desde aquí sin repetirla): ' + anterior.slice(-1000));
 
     return pedir(partes.join('\n').slice(0, 3900));

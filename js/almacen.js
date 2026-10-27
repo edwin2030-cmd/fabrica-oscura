@@ -1,6 +1,6 @@
 /* ==========================================================
    Almacén del navegador (IndexedDB) para archivos grandes:
-   imágenes y audio de cada proyecto. localStorage no sirve
+   imágenes, audio y video de cada proyecto. localStorage no sirve
    para esto porque solo admite unos pocos megas.
    ========================================================== */
 
@@ -8,8 +8,8 @@ var Almacen = (function () {
   'use strict';
 
   var NOMBRE = 'fabricaOscura';
-  var VERSION = 2;                       // 1: imágenes · 2: + audio
-  var TABLAS = ['imagenes', 'audios'];
+  var VERSION = 3;                       // 1: imágenes · 2: + audio · 3: + video
+  var TABLAS = ['imagenes', 'audios', 'videos'];
 
   var promesaBD = null;
   function bd() {

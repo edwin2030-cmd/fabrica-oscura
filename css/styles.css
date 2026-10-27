@@ -385,3 +385,24 @@ select { appearance: none; -webkit-appearance: none; cursor: pointer;
 .requisitos .falta { color: #ff8a92; }
 .video-seccion input[type="range"] { width: 160px; accent-color: var(--accent); }
 #videoResultado video { width: 100%; max-height: 70vh; background: #000; border-radius: var(--radius-sm); margin-bottom: 10px; }
+
+/* ---------- Publicar en YouTube ---------- */
+.youtube-seccion { margin-top: 32px; padding-top: 22px; border-top: 1px solid var(--border); }
+.yt-conexion { margin-bottom: 16px; padding: 14px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); }
+.yt-conexion p { margin-bottom: 10px; }
+.yt-conexion code, .yt-config code { word-break: break-all; }
+.yt-fila { display: flex; gap: 8px; flex-wrap: wrap; }
+.yt-fila input { flex: 1 1 260px; margin-top: 0; }
+.yt-conectado { color: var(--ok); }
+.yt-error { color: #ff8a92; }
+.contador { font-weight: 400; font-size: .78rem; margin-left: 6px; }
+.contador.excedido { color: #ff8a92; }
+.yt-resultado { margin-bottom: 14px; padding: 14px; border: 1px solid var(--border); border-left: 3px solid var(--ok); border-radius: var(--radius-sm); background: var(--surface); word-break: break-all; }
+.yt-subtitulo { font-size: 1rem; margin-top: 18px; }
+.yt-historial { list-style: none; padding: 0; margin: 0; display: grid; gap: 8px; }
+.yt-historial li { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; padding: 12px 14px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); font-size: .92rem; }
+.yt-historial-acciones { display: flex; gap: 6px; }
+.yt-config { margin-bottom: 24px; }
+.yt-config h2 { font-size: 1.1rem; }
+.modal-text { white-space: pre-line; }
+input[type="datetime-local"] { display: block; width: 100%; margin-top: 6px; padding: 10px 12px; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: var(--radius-sm); font: inherit; font-size: .95rem; color-scheme: dark; }

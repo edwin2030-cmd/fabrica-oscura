@@ -215,6 +215,8 @@
         }
         Imagenes.borrar(id).catch(function () { /* sin imágenes guardadas */ });
         Almacen.borrar('audios', id).catch(function () { /* sin audio guardado */ });
+        Almacen.borrar('videos', id).catch(function () { /* sin video guardado */ });
+        YouTube.borrarBorrador(id);
         if (Storage.eliminar(id)) aviso('Proyecto eliminado');
         else aviso('No se pudo eliminar el proyecto', 'error');
         if (ruta().vista === 'editor') location.hash = '#proyectos';
@@ -341,6 +343,7 @@
           '<div class="feature"><div class="feature-icon">🎙️</div><h3>Voces con IA</h3><p>Convierte la narración en audio con voces masculinas y femeninas, escúchala y descárgala en MP3.</p></div>' +
           '<div class="feature"><div class="feature-icon">🖼️</div><h3>Imágenes con IA</h3><p>Ilustra cada escena con imágenes cinematográficas y oscuras en 16:9, con personajes coherentes.</p></div>' +
           '<div class="feature"><div class="feature-icon">🎬</div><h3>Videos MP4</h3><p>Une imágenes con movimiento, narración, música y subtítulos en un video listo para YouTube.</p></div>' +
+          '<div class="feature"><div class="feature-icon">📺</div><h3>Publicar en YouTube</h3><p>Título, descripción y etiquetas con IA, visibilidad o fecha programada, barra de subida e historial. Siempre con tu confirmación.</p></div>' +
           '<div class="feature"><div class="feature-icon">💾</div><h3>Guardado automático</h3><p>Tus proyectos se guardan solos en este navegador mientras escribes.</p></div>' +
           '<div class="feature"><div class="feature-icon">📱</div><h3>En cualquier pantalla</h3><p>Funciona en computadoras, tabletas y teléfonos.</p></div>' +
         '</div>' +
@@ -547,6 +550,7 @@
             '<p class="hint">El video se crea dentro de tu navegador (Chrome o Edge en computadora), sin servidores ni costos. ' +
               'Un video de 10 minutos puede tardar varios minutos: no cierres la pestaña mientras se crea.</p>' +
           '</div>' +
+          seccionYouTube() +
         '</section>' +
       '</div>';
 
@@ -554,6 +558,7 @@
     prepararPanelVoz();
     prepararImagenes(p);
     actualizarRequisitosVideo();
+    prepararYouTube(p);
   }
 
   function pintarEscenas() {
@@ -1353,8 +1358,14 @@
     }).then(function (r) {
       if (videoHecho) URL.revokeObjectURL(videoHecho.url);
       videoHecho = { proyectoId: proyecto.id, blob: r.blob, url: URL.createObjectURL(r.blob), subtitulos: r.subtitulos, duracion: r.duracion, completo: completo };
+      // El video completo se guarda en el navegador para no perderlo al recargar y poder subirlo a YouTube.
+      if (completo) {
+        Almacen.poner('videos', { proyectoId: proyecto.id, blob: r.blob, subtitulos: r.subtitulos, duracion: r.duracion, fecha: new Date().toISOString() })
+          .catch(function () { aviso('El video no cupo en el almacén del navegador: descárgalo para no perderlo.', 'error'); });
+      }
       if (editor && editor.proyecto === proyecto) {
         mostrarVideo();
+        pintarFuenteYT();
         aviso(completo ? 'Video creado. Revísalo y descárgalo.' : 'Vista previa lista');
       }
     }, function (err) {
@@ -1379,6 +1390,424 @@
     if (!videoHecho || !videoHecho.subtitulos) return;
     var base = nombreArchivo(editor ? editor.proyecto.titulo : 'video').replace(/\.txt$/, '');
     descargarBlob(new Blob([Video.aSRT(videoHecho.subtitulos)], { type: 'text/plain;charset=utf-8' }), base + '.srt');
+  }
+
+  /* ---------------- Publicar en YouTube ---------------- */
+
+  var ytOcupado = false;
+  var videoGuardado = null;  // { proyectoId, blob, duracion } — último video completo guardado en el navegador
+
+  function seccionYouTube() {
+    return '' +
+      '<div class="youtube-seccion">' +
+        '<div class="scenes-head"><h2>📺 Publicar en YouTube</h2></div>' +
+        '<div id="ytConexion" class="yt-conexion"></div>' +
+        '<label>Video que se va a subir<select id="ytFuente"></select></label>' +
+        '<label id="ytArchivoCaja" hidden>Archivo MP4 de tu computadora<input type="file" id="ytArchivo" accept="video/mp4,.mp4"></label>' +
+        '<p class="hint" id="ytFuenteInfo"></p>' +
+        '<div class="img-acciones">' +
+          '<button type="button" class="btn" data-action="yt-datos-ia">✨ Crear título, descripción y etiquetas con IA</button>' +
+        '</div>' +
+        '<label>Título <span class="contador" id="ytTituloCuenta"></span><input type="text" id="ytTitulo" maxlength="' + YouTube.MAX_TITULO + '"></label>' +
+        '<label>Descripción<textarea id="ytDescripcion" rows="8" placeholder="Los hashtags van al final de la descripción, por ejemplo: #terror #misterio"></textarea></label>' +
+        '<label>Etiquetas (separadas por comas) <span class="contador" id="ytEtiquetasCuenta"></span><input type="text" id="ytEtiquetas" placeholder="historias de terror, relatos de miedo, misterio"></label>' +
+        '<div class="img-controles">' +
+          '<label>Visibilidad<select id="ytPrivacidad">' + opciones(YouTube.VISIBILIDADES, 'private') + '</select></label>' +
+          '<label>Categoría<select id="ytCategoria">' + opciones(YouTube.CATEGORIAS, '24') + '</select></label>' +
+          '<label class="check"><input type="checkbox" id="ytProgramar"> Programar la publicación</label>' +
+          '<label id="ytFechaCaja" hidden>Fecha y hora (tu hora local)<input type="datetime-local" id="ytFecha"></label>' +
+        '</div>' +
+        '<div class="img-controles">' +
+          '<label class="check"><input type="checkbox" id="ytSintetico" checked> Contiene contenido realista creado o alterado con IA (aviso que pide YouTube)</label>' +
+          '<label class="check"><input type="checkbox" id="ytNinos"> Es un video hecho para niños</label>' +
+        '</div>' +
+        '<p class="hint" id="ytProgramarInfo" hidden>Al programar, el video se sube como privado y YouTube lo hace público solo en la fecha elegida, aunque tu computadora esté apagada.</p>' +
+        '<div class="img-acciones">' +
+          '<button type="button" class="btn btn-primary" data-action="yt-publicar">📤 Revisar y subir a YouTube</button>' +
+          '<button type="button" class="btn btn-ghost" data-action="yt-cancelar" hidden>⏹ Cancelar subida</button>' +
+        '</div>' +
+        '<div id="ytProgreso" class="voz-progreso" hidden><progress max="1" value="0"></progress><p class="hint" id="ytMensaje"></p></div>' +
+        '<div id="ytResultado" class="yt-resultado" hidden></div>' +
+        '<h3 class="yt-subtitulo">Historial de este proyecto</h3>' +
+        '<div id="ytHistorial"></div>' +
+        '<p class="hint">El video va directo de tu navegador a YouTube. El permiso de Google dura 1 hora y solo vive en esta pestaña. ' +
+          'Nada se sube sin que lo confirmes. La cuota gratuita de YouTube alcanza para unas pocas subidas al día. ' +
+          'Mientras Google no revise tu app, YouTube puede dejar los videos en privado aunque elijas otra visibilidad. ' +
+          'Los subtítulos .srt súbelos desde YouTube Studio → Subtítulos.</p>' +
+      '</div>';
+  }
+
+  function prepararYouTube(p) {
+    var b = YouTube.borrador(p.id) || {};
+    document.getElementById('ytTitulo').value = b.titulo != null ? b.titulo : p.titulo.slice(0, YouTube.MAX_TITULO);
+    document.getElementById('ytDescripcion').value = b.descripcion || '';
+    document.getElementById('ytEtiquetas').value = b.etiquetas || '';
+    if (YouTube.VISIBILIDADES[b.privacidad]) document.getElementById('ytPrivacidad').value = b.privacidad;
+    if (YouTube.CATEGORIAS[b.categoria]) document.getElementById('ytCategoria').value = b.categoria;
+    if (typeof b.sintetico === 'boolean') document.getElementById('ytSintetico').checked = b.sintetico;
+    document.getElementById('ytNinos').checked = !!b.paraNinos;
+    actualizarContadoresYT();
+    pintarProgramarYT();
+    pintarConexionYT();
+    pintarFuenteYT();
+    pintarHistorialYT();
+
+    if (YouTube.clienteId()) {
+      YouTube.preparar().then(pintarConexionYT, function (err) {
+        var cont = document.getElementById('ytConexion');
+        if (cont) cont.insertAdjacentHTML('beforeend', '<p class="hint yt-error">' + esc(err.message) + '</p>');
+      });
+    }
+
+    Almacen.obtener('videos', p.id).then(function (g) {
+      if (!g || !editor || editor.proyecto.id !== p.id) return;
+      videoGuardado = { proyectoId: p.id, blob: g.blob, duracion: g.duracion, fecha: g.fecha };
+      // Si en esta sesión aún no se creó ningún video, se muestra el guardado.
+      if (!(videoHecho && videoHecho.proyectoId === p.id)) {
+        if (videoHecho) URL.revokeObjectURL(videoHecho.url);
+        videoHecho = { proyectoId: p.id, blob: g.blob, url: URL.createObjectURL(g.blob), subtitulos: g.subtitulos, duracion: g.duracion, completo: true };
+        mostrarVideo();
+      }
+      pintarFuenteYT();
+    }).catch(function () { /* sin video guardado */ });
+  }
+
+  function pintarConexionYT() {
+    var cont = document.getElementById('ytConexion');
+    if (!cont) return;
+    var canal = YouTube.canal();
+    if (!YouTube.clienteId()) {
+      cont.innerHTML = '<p>Para conectar tu canal, primero pega el <strong>ID de cliente</strong> que creaste en Google Cloud ' +
+        '(termina en <code>.apps.googleusercontent.com</code>). No es secreto. Nunca pegues aquí el "secreto del cliente".</p>' +
+        '<div class="yt-fila"><input type="text" id="ytClienteId" placeholder="123456789-abc123.apps.googleusercontent.com" autocomplete="off">' +
+        '<button type="button" class="btn btn-primary" data-action="yt-guardar-id">Guardar</button></div>';
+    } else if (canal) {
+      cont.innerHTML = '<p class="yt-conectado">✅ Conectado al canal <strong>' + esc(canal.nombre) + '</strong></p>' +
+        '<button type="button" class="btn btn-sm btn-ghost" data-action="yt-desconectar">Desconectar</button>';
+    } else {
+      cont.innerHTML = '<button type="button" class="btn btn-primary" data-action="yt-conectar"' + (YouTube.listo() ? '' : ' disabled') + '>🔑 Conectar mi cuenta de YouTube</button>' +
+        (YouTube.listo() ? '' : '<p class="hint">Cargando el inicio de sesión de Google…</p>') +
+        '<p class="hint">Google te mostrará un aviso de "app no verificada": es normal porque la app es tuya. Pulsa "Continuar".</p>';
+    }
+    pintarBotonPublicarYT();
+  }
+
+  // El video que se subiría: el creado aquí, el guardado o un archivo elegido.
+  function videoParaSubir() {
+    var sel = document.getElementById('ytFuente');
+    if (!sel || !editor) return null;
+    if (sel.value === 'archivo') {
+      var f = document.getElementById('ytArchivo').files[0];
+      return f ? { blob: f, nombre: f.name } : null;
+    }
+    var id = editor.proyecto.id;
+    if (videoHecho && videoHecho.proyectoId === id && videoHecho.completo) return { blob: videoHecho.blob, duracion: videoHecho.duracion, nombre: 'video creado' };
+    if (videoGuardado && videoGuardado.proyectoId === id) return { blob: videoGuardado.blob, duracion: videoGuardado.duracion, nombre: 'video guardado' };
+    return null;
+  }
+
+  function pintarFuenteYT() {
+    var sel = document.getElementById('ytFuente');
+    if (!sel || !editor) return;
+    var anterior = sel.value;
+    var id = editor.proyecto.id;
+    var propio = (videoHecho && videoHecho.proyectoId === id && videoHecho.completo) || (videoGuardado && videoGuardado.proyectoId === id);
+    sel.innerHTML = (propio ? '<option value="propio">🎬 Video completo creado en Fábrica Oscura</option>' : '') +
+      '<option value="archivo">📁 Elegir un MP4 de mi computadora</option>';
+    sel.value = anterior === 'archivo' || !propio ? 'archivo' : 'propio';
+    document.getElementById('ytArchivoCaja').hidden = sel.value !== 'archivo';
+    var v = videoParaSubir();
+    document.getElementById('ytFuenteInfo').textContent = v
+      ? 'Listo para subir: ' + (v.blob.size / 1048576).toFixed(1) + ' MB' + (v.duracion ? ' · ' + formatoDuracion(v.duracion * PALABRAS_POR_MINUTO / 60) + ' min' : '')
+      : propio ? 'Elige el archivo MP4.' : 'Aún no hay un video completo de este proyecto: créalo arriba en "🎬 Video MP4" o elige un MP4 de tu computadora.';
+    pintarBotonPublicarYT();
+  }
+
+  function pintarProgramarYT() {
+    var programar = document.getElementById('ytProgramar').checked;
+    document.getElementById('ytFechaCaja').hidden = !programar;
+    document.getElementById('ytProgramarInfo').hidden = !programar;
+    document.getElementById('ytPrivacidad').disabled = programar || ytOcupado;
+    if (programar && !document.getElementById('ytFecha').value) {
+      // Por defecto: mañana a las 7 de la tarde.
+      var f = new Date();
+      f.setDate(f.getDate() + 1);
+      f.setHours(19, 0, 0, 0);
+      var dos = function (n) { return (n < 10 ? '0' : '') + n; };
+      document.getElementById('ytFecha').value = f.getFullYear() + '-' + dos(f.getMonth() + 1) + '-' + dos(f.getDate()) + 'T19:00';
+    }
+  }
+
+  function pintarBotonPublicarYT() {
+    var boton = document.querySelector('[data-action="yt-publicar"]');
+    if (boton) boton.disabled = ytOcupado || !YouTube.clienteId() || !videoParaSubir();
+  }
+
+  function etiquetasYT() {
+    return document.getElementById('ytEtiquetas').value.split(',').map(function (t) { return t.trim(); }).filter(Boolean);
+  }
+
+  function actualizarContadoresYT() {
+    var titulo = document.getElementById('ytTitulo').value;
+    document.getElementById('ytTituloCuenta').textContent = titulo.length + '/' + YouTube.MAX_TITULO;
+    var largo = YouTube.largoEtiquetas(etiquetasYT());
+    var cuenta = document.getElementById('ytEtiquetasCuenta');
+    cuenta.textContent = largo + '/' + YouTube.MAX_ETIQUETAS + (largo > YouTube.MAX_ETIQUETAS ? ' (las que sobren no se enviarán)' : '');
+    cuenta.classList.toggle('excedido', largo > YouTube.MAX_ETIQUETAS);
+  }
+
+  function leerFormularioYT() {
+    var programar = document.getElementById('ytProgramar').checked;
+    return {
+      titulo: document.getElementById('ytTitulo').value,
+      descripcion: document.getElementById('ytDescripcion').value,
+      etiquetas: etiquetasYT(),
+      privacidad: programar ? 'public' : document.getElementById('ytPrivacidad').value,
+      categoria: document.getElementById('ytCategoria').value,
+      publicarEn: programar ? document.getElementById('ytFecha').value : '',
+      sintetico: document.getElementById('ytSintetico').checked,
+      paraNinos: document.getElementById('ytNinos').checked
+    };
+  }
+
+  function guardarBorradorYT() {
+    if (!editor) return;
+    YouTube.guardarBorrador(editor.proyecto.id, {
+      titulo: document.getElementById('ytTitulo').value,
+      descripcion: document.getElementById('ytDescripcion').value,
+      etiquetas: document.getElementById('ytEtiquetas').value,
+      privacidad: document.getElementById('ytPrivacidad').value,
+      categoria: document.getElementById('ytCategoria').value,
+      sintetico: document.getElementById('ytSintetico').checked,
+      paraNinos: document.getElementById('ytNinos').checked
+    });
+  }
+
+  function cambioYT(t) {
+    if (t.id === 'ytClienteId') return;
+    if (t.id === 'ytFuente' || t.id === 'ytArchivo') { pintarFuenteYT(); return; }
+    if (t.id === 'ytProgramar') pintarProgramarYT();
+    if (t.id === 'ytTitulo' || t.id === 'ytEtiquetas') actualizarContadoresYT();
+    guardarBorradorYT();
+  }
+
+  function guardarClienteIdYT() {
+    try {
+      YouTube.guardarClienteId(document.getElementById('ytClienteId').value);
+    } catch (err) {
+      aviso(err.message, 'error');
+      return;
+    }
+    aviso('ID de cliente guardado');
+    pintarConexionYT();
+    YouTube.preparar().then(pintarConexionYT, function (err) { aviso(err.message, 'error'); });
+  }
+
+  // Se llama directamente desde el clic para que el navegador no bloquee la ventana de Google.
+  function conectarYT() {
+    var boton = document.querySelector('[data-action="yt-conectar"]');
+    if (boton) boton.disabled = true;
+    return YouTube.conectar().then(function (canal) {
+      aviso('Conectado al canal ' + canal.nombre);
+      return canal;
+    }, function (err) {
+      aviso(err.message, 'error');
+      throw err;
+    }).finally(pintarConexionYT);
+  }
+
+  function datosConIA(boton) {
+    if (!editor || ytOcupado) return;
+    var proyecto = editor.proyecto;
+    var hayTexto = document.getElementById('ytTitulo').value.trim() !== proyecto.titulo.trim().slice(0, YouTube.MAX_TITULO) ||
+      document.getElementById('ytDescripcion').value.trim();
+    var seguir = hayTexto
+      ? confirmar('¿Reemplazar los datos?', 'La IA escribirá un nuevo título, descripción y etiquetas en lugar de los que tienes ahora.', 'Reemplazar')
+      : Promise.resolve(true);
+    seguir.then(function (ok) {
+      if (!ok) return;
+      var v = videoParaSubir();
+      var texto = boton.textContent;
+      boton.disabled = true;
+      boton.textContent = '✨ Escribiendo…';
+      return YouTube.generarDatos(proyecto, v && v.duracion).then(function (d) {
+        if (!editor || editor.proyecto !== proyecto) return;
+        document.getElementById('ytTitulo').value = d.titulo;
+        document.getElementById('ytDescripcion').value = d.descripcion;
+        document.getElementById('ytEtiquetas').value = d.etiquetas.join(', ');
+        actualizarContadoresYT();
+        guardarBorradorYT();
+        aviso('Datos listos. Revísalos y edítalos antes de subir.');
+      }, function (err) {
+        aviso(err.message, 'error');
+      }).finally(function () {
+        boton.disabled = false;
+        boton.textContent = texto;
+      });
+    });
+  }
+
+  function progresoYT(fraccion, mensaje) {
+    var caja = document.getElementById('ytProgreso');
+    if (!caja) return;
+    caja.hidden = fraccion === null;
+    if (fraccion === null) return;
+    caja.querySelector('progress').value = fraccion;
+    document.getElementById('ytMensaje').textContent = mensaje;
+  }
+
+  function marcarYTOcupado(ocupado) {
+    ytOcupado = ocupado;
+    Array.prototype.forEach.call(document.querySelectorAll('.youtube-seccion input, .youtube-seccion textarea, .youtube-seccion select, [data-action="yt-datos-ia"], [data-action="yt-desconectar"]'), function (el) {
+      el.disabled = ocupado;
+    });
+    var cancelar = document.querySelector('[data-action="yt-cancelar"]');
+    if (cancelar) cancelar.hidden = !ocupado;
+    if (!ocupado && document.getElementById('ytProgramar')) pintarProgramarYT();
+    pintarBotonPublicarYT();
+  }
+
+  function publicarYT() {
+    if (!editor || ytOcupado) return;
+    // Si el permiso venció, se pide de nuevo aquí mismo (dentro del clic).
+    if (!YouTube.conectado()) {
+      if (!YouTube.listo()) { aviso('Primero conecta tu cuenta de YouTube.', 'error'); return; }
+      conectarYT().then(function () { publicarYT(); }, function () { /* ya avisado */ });
+      return;
+    }
+    var proyecto = editor.proyecto;
+    var video = videoParaSubir();
+    if (!video) { aviso('Elige el video que quieres subir.', 'error'); return; }
+    if (video.blob.type && !/mp4/.test(video.blob.type)) { aviso('El archivo debe ser un video MP4.', 'error'); return; }
+    var datos = leerFormularioYT();
+    if (!datos.titulo.trim()) { aviso('Escribe un título para el video.', 'error'); return; }
+    if (YouTube.largoEtiquetas(datos.etiquetas) > YouTube.MAX_ETIQUETAS) {
+      datos.etiquetas = YouTube.normalizarEtiquetas(datos.etiquetas);
+    }
+
+    var canal = YouTube.canal();
+    var cuando = datos.publicarEn
+      ? 'Se subirá como privado y YouTube lo hará PÚBLICO el ' + new Date(datos.publicarEn).toLocaleString('es') + '.'
+      : 'Visibilidad: ' + YouTube.VISIBILIDADES[datos.privacidad] + '.';
+    var hoy = YouTube.subidasDeHoy();
+    var texto = 'Canal: ' + canal.nombre + '\n' +
+      'Título: ' + datos.titulo.trim() + '\n' +
+      cuando + '\n' +
+      'Tamaño: ' + (video.blob.size / 1048576).toFixed(1) + ' MB' +
+      (hoy ? '\nHoy ya subiste ' + hoy + ' video' + (hoy === 1 ? '' : 's') + ' (la cuota gratuita es limitada).' : '') +
+      '\n\n¿Confirmas que quieres subir este video a YouTube?';
+
+    confirmar('¿Subir a YouTube?', texto, 'Sí, subir el video').then(function (ok) {
+      if (!ok || !editor || editor.proyecto !== proyecto) return;
+      marcarYTOcupado(true);
+      document.getElementById('ytResultado').hidden = true;
+      progresoYT(0, 'Preparando…');
+      return YouTube.subir(video.blob, datos, function (f, msg) {
+        if (editor && editor.proyecto === proyecto) progresoYT(f, msg);
+      }).then(function (r) {
+        var entrada = {
+          fecha: new Date().toISOString(),
+          proyectoId: proyecto.id,
+          proyecto: proyecto.titulo,
+          videoId: r.id,
+          titulo: r.titulo,
+          visibilidad: datos.publicarEn ? 'programado' : datos.privacidad,
+          publicarEn: r.publicarEn || '',
+          canal: canal.nombre
+        };
+        YouTube.registrar(entrada);
+        if (editor && editor.proyecto === proyecto) {
+          proyecto.estado = 'publicado';
+          var sel = document.querySelector('[data-field="estado"]');
+          if (sel) sel.value = 'publicado';
+          cambioEnEditor();
+          pintarResultadoYT(entrada, r.privacidad);
+          pintarHistorialYT();
+        } else {
+          var guardado = Storage.obtener(proyecto.id);
+          if (guardado) { guardado.estado = 'publicado'; Storage.guardar(guardado); }
+        }
+        aviso('¡Video subido a YouTube!');
+      }, function (err) {
+        aviso(err.message, 'error');
+        var res = document.getElementById('ytResultado');
+        if (res) {
+          res.hidden = false;
+          res.innerHTML = '<p class="yt-error">❌ ' + esc(err.message) + '</p>';
+        }
+      }).finally(function () {
+        progresoYT(null);
+        marcarYTOcupado(false);
+      });
+    });
+  }
+
+  function textoVisibilidad(e) {
+    if (e.visibilidad === 'programado') return 'Programado para el ' + new Date(e.publicarEn).toLocaleString('es');
+    return YouTube.VISIBILIDADES[e.visibilidad] || e.visibilidad;
+  }
+
+  function pintarResultadoYT(e, privacidadReal) {
+    var res = document.getElementById('ytResultado');
+    if (!res) return;
+    var nota = e.visibilidad !== 'private' && privacidadReal === 'private' && e.visibilidad !== 'programado'
+      ? '<p class="hint">YouTube lo dejó en privado. Si tu app de Google aún no está verificada, es lo esperado: revísalo en YouTube Studio.</p>'
+      : '';
+    res.hidden = false;
+    res.innerHTML = '<p>✅ <strong>Video subido.</strong> ' + esc(textoVisibilidad(e)) + '.</p>' +
+      '<p><a href="' + esc(YouTube.enlace(e.videoId)) + '" target="_blank" rel="noopener">' + esc(YouTube.enlace(e.videoId)) + '</a></p>' +
+      '<div class="img-acciones">' +
+        '<a class="btn btn-sm" href="' + esc(YouTube.enlaceStudio(e.videoId)) + '" target="_blank" rel="noopener">Abrir en YouTube Studio</a>' +
+        '<button type="button" class="btn btn-sm" data-action="yt-estado" data-id="' + esc(e.videoId) + '">Comprobar estado</button>' +
+      '</div>' + nota +
+      '<p class="hint">YouTube tarda unos minutos en procesar el video antes de que se vea en alta calidad.</p>';
+  }
+
+  function filasHistorial(lista, conProyecto) {
+    if (!lista.length) return '<p class="hint">Todavía no hay publicaciones.</p>';
+    return '<ul class="yt-historial">' + lista.map(function (e) {
+      return '<li>' +
+        '<div><strong>' + esc(e.titulo) + '</strong>' +
+          '<span class="muted"> · ' + esc(formatoFecha(e.fecha)) + ' · ' + esc(textoVisibilidad(e)) + ' · ' + esc(e.canal || '') + '</span>' +
+          (conProyecto ? '<br><a class="muted" href="#editor/' + encodeURIComponent(e.proyectoId) + '">Proyecto: ' + esc(e.proyecto || '') + '</a>' : '') +
+        '</div>' +
+        '<div class="yt-historial-acciones">' +
+          '<a class="btn btn-sm" href="' + esc(YouTube.enlace(e.videoId)) + '" target="_blank" rel="noopener">Ver en YouTube</a>' +
+          '<button type="button" class="btn btn-sm btn-ghost" data-action="yt-estado" data-id="' + esc(e.videoId) + '">Estado</button>' +
+        '</div>' +
+      '</li>';
+    }).join('') + '</ul>';
+  }
+
+  function pintarHistorialYT() {
+    var cont = document.getElementById('ytHistorial');
+    if (!cont || !editor) return;
+    var id = editor.proyecto.id;
+    cont.innerHTML = filasHistorial(YouTube.historial().filter(function (e) { return e.proyectoId === id; }), false);
+  }
+
+  function estadoYT(boton) {
+    var id = boton.getAttribute('data-id');
+    if (!YouTube.conectado()) { aviso('Conecta tu cuenta de YouTube para comprobar el estado.', 'error'); return; }
+    boton.disabled = true;
+    YouTube.estado(id).then(function (t) { aviso(t); }, function (err) { aviso(err.message, 'error'); })
+      .finally(function () { boton.disabled = false; });
+  }
+
+  function vistaPublicaciones() {
+    var lista = YouTube.historial();
+    var id = YouTube.clienteId();
+    app.innerHTML = '' +
+      '<div class="page-head"><h1>Publicaciones en YouTube</h1>' +
+        '<p class="muted">Historial de los videos que subiste desde Fábrica Oscura en este navegador.</p></div>' +
+      '<div class="panel yt-config">' +
+        '<h2>Conexión con Google</h2>' +
+        (id
+          ? '<p>ID de cliente guardado: <code>' + esc(id.replace(/^(\d{4})\d*-(.{4}).*$/, '$1…-$2…')) + '</code></p>' +
+            '<button type="button" class="btn btn-sm btn-danger-ghost" data-action="yt-olvidar-id">Quitar ID de cliente</button>'
+          : '<p class="muted">Aún no configuras YouTube. Abre un proyecto y busca "📺 Publicar en YouTube".</p>') +
+      '</div>' +
+      '<div class="section">' + filasHistorial(lista, true) + '</div>';
   }
 
   /* ---------------- Navegación ---------------- */
@@ -1409,6 +1838,7 @@
     });
 
     if (r.vista === 'proyectos') { vistaProyectos(); document.title = 'Proyectos — Fábrica Oscura'; }
+    else if (r.vista === 'publicaciones') { vistaPublicaciones(); document.title = 'Publicaciones — Fábrica Oscura'; }
     else if (r.vista === 'ideas') { vistaIdeas(); document.title = 'Generador de ideas — Fábrica Oscura'; }
     else if (r.vista === 'editor') { vistaEditor(r.id); document.title = (editor ? editor.proyecto.titulo : 'Editor') + ' — Fábrica Oscura'; }
     else { vistaInicio(); document.title = 'Fábrica Oscura — Videos de terror y misterio'; }
@@ -1465,6 +1895,27 @@
         break;
       case 'video-descargar': descargarVideo(); break;
       case 'video-srt': descargarSRT(); break;
+      case 'yt-guardar-id': guardarClienteIdYT(); break;
+      case 'yt-conectar': conectarYT().catch(function () { /* ya avisado */ }); break;
+      case 'yt-desconectar':
+        YouTube.desconectar();
+        aviso('Cuenta de YouTube desconectada');
+        pintarConexionYT();
+        break;
+      case 'yt-datos-ia': datosConIA(boton); break;
+      case 'yt-publicar': publicarYT(); break;
+      case 'yt-cancelar':
+        YouTube.cancelar();
+        progresoYT(0, 'Cancelando…');
+        break;
+      case 'yt-estado': estadoYT(boton); break;
+      case 'yt-olvidar-id':
+        confirmar('¿Quitar el ID de cliente?', 'Se desconectará tu cuenta de YouTube en esta página. El historial no se borra.', 'Quitar').then(function (ok) {
+          if (!ok) return;
+          YouTube.olvidarClienteId();
+          vistaPublicaciones();
+        });
+        break;
       case 'copiar-idea':
         copiarTexto(Ideas.comoTexto(ideaActual)).then(function (ok) {
           aviso(ok ? 'Idea copiada al portapapeles' : 'No se pudo copiar la idea', ok ? '' : 'error');
@@ -1506,6 +1957,7 @@
     if (t.id === 'videoVolumen') { document.getElementById('videoVolumenValor').textContent = t.value + '%'; return; }
     if (t.id === 'videoMusica') { document.getElementById('videoArchivoCaja').hidden = t.value !== 'archivo'; return; }
     if (t.id === 'videoFormato' || t.id === 'videoSubtitulos' || t.id === 'videoArchivo') return;
+    if (/^yt[A-Z]/.test(t.id)) { cambioYT(t); return; }
 
     var campo = t.getAttribute('data-field');
     if (campo) {

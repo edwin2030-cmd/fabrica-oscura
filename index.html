@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Fábrica Oscura: planifica y escribe guiones de videos de terror y misterio para YouTube.">
+  <meta name="theme-color" content="#0b0b0f">
+  <title>Fábrica Oscura — Videos de terror y misterio</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ccircle cx='50' cy='50' r='44' fill='%23c1121f'/%3E%3Ccircle cx='50' cy='50' r='16' fill='%230b0b0f'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <a href="#inicio" class="logo" aria-label="Fábrica Oscura, ir al inicio">
+        <span class="logo-eye" aria-hidden="true"></span>
+        Fábrica<span class="logo-accent">Oscura</span>
+      </a>
+      <button class="menu-toggle" type="button" aria-label="Abrir menú" aria-expanded="false" aria-controls="nav">
+        <span></span><span></span><span></span>
+      </button>
+      <nav id="nav" class="nav" aria-label="Navegación principal">
+        <a href="#inicio" data-nav="inicio">Inicio</a>
+        <a href="#proyectos" data-nav="proyectos">Proyectos</a>
+        <a href="#ideas" data-nav="ideas">Generador de ideas</a>
+        <button type="button" class="btn btn-primary btn-sm" data-action="nuevo-proyecto">+ Nuevo proyecto</button>
+      </nav>
+    </div>
+  </header>
+
+  <main id="app" tabindex="-1"></main>
+
+  <footer class="footer">
+    <p>Fábrica Oscura · Los proyectos se guardan solo en este navegador.</p>
+  </footer>
+
+  <div id="toasts" class="toasts" aria-live="polite" aria-atomic="true"></div>
+
+  <div id="modal" class="modal" hidden>
+    <div class="modal-backdrop" data-modal="cancelar"></div>
+    <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="modalTitulo">
+      <h2 id="modalTitulo" class="modal-title">¿Estás seguro?</h2>
+      <p id="modalTexto" class="modal-text"></p>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-ghost" data-modal="cancelar">Cancelar</button>
+        <button type="button" class="btn btn-danger" data-modal="aceptar" id="modalAceptar">Eliminar</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="js/storage.js"></script>
+  <script src="js/ideas.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>

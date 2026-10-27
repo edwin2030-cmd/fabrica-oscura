@@ -1,0 +1,11 @@
+# Protección: estos archivos nunca se suben a GitHub.
+# Notas personales que podrían contener claves o datos privados.
+*.txt
+*.rtf
+*.docx
+*clave*
+*secret*
+*password*
+.env
+.env.*
+.dev.vars

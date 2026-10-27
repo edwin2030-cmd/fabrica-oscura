@@ -1,8 +1,10 @@
 /* ==========================================================
-   Fábrica Oscura — intermediario seguro para Gemini
-   (textos y voces). Se pega en un Worker de Cloudflare.
+   Fábrica Oscura — intermediario seguro
+   Textos y voces con Gemini; imágenes con Workers AI de
+   Cloudflare. Se pega en un Worker de Cloudflare.
    La clave de Gemini NO va aquí: se guarda en Cloudflare
-   como secreto llamado GEMINI_API_KEY.
+   como secreto llamado GEMINI_API_KEY. Las imágenes usan la
+   conexión (binding) de Workers AI llamada AI, sin clave.
    ========================================================== */
 
 // Páginas que pueden usar este intermediario.
@@ -13,24 +15,28 @@ var ORIGENES_PERMITIDOS = [
 // Modelos de Gemini, en orden de preferencia. Si uno está
 // ocupado o ya no existe, se prueba el siguiente.
 // Los terminados en "-latest" los mantiene Google al día solos.
+// Primero va el que menos se satura, para responder más rápido.
 var MODELOS = [
+  'gemini-flash-lite-latest',
   'gemini-3.8-flash',
   'gemini-flash-latest',
-  'gemini-3.8-flash-lite',
-  'gemini-flash-lite-latest'
+  'gemini-3.8-flash-lite'
 ];
 
-var MAX_CARACTERES_PEDIDO = 4000;  // largo máximo de lo que envía la página
-var MAX_TOKENS_RESPUESTA = 4096;   // largo máximo de la respuesta (~3000 palabras)
+var MAX_CARACTERES_PEDIDO = 24000; // largo máximo de lo que envía la página (historias completas)
+var MAX_TOKENS_RESPUESTA = 8192;   // largo máximo de la respuesta
 var ESPERA_REINTENTO = 2000;       // milisegundos antes de reintentar un modelo ocupado
-var TIEMPO_POR_INTENTO = 20000;    // milisegundos máximos de espera por cada intento
+var TIEMPO_POR_INTENTO = 45000;    // milisegundos máximos de espera por cada intento
+var TIEMPO_TOTAL = 85000;          // límite total, por debajo de los 100 s que espera Cloudflare
 
 function esperar(ms) {
   return new Promise(function (resolver) { setTimeout(resolver, ms); });
 }
 
 // Un solo pedido a un modelo. Devuelve { estado, datos }.
-async function pedirAGemini(modelo, texto, clave) {
+async function pedirAGemini(modelo, texto, clave, json, tiempo) {
+  var config = { maxOutputTokens: MAX_TOKENS_RESPUESTA, temperature: 0.9 };
+  if (json) config.responseMimeType = 'application/json';
   var url = 'https://generativelanguage.googleapis.com/v1beta/models/' + modelo + ':generateContent';
   try {
     var respuesta = await fetch(url, {
@@ -41,9 +47,9 @@ async function pedirAGemini(modelo, texto, clave) {
       },
       body: JSON.stringify({
         contents: [{ role: 'user', parts: [{ text: texto }] }],
-        generationConfig: { maxOutputTokens: MAX_TOKENS_RESPUESTA, temperature: 0.9 }
+        generationConfig: config
       }),
-      signal: AbortSignal.timeout(TIEMPO_POR_INTENTO)
+      signal: AbortSignal.timeout(Math.max(1000, Math.min(TIEMPO_POR_INTENTO, tiempo)))
     });
     var datos = await respuesta.json().catch(function () { return {}; });
     return { estado: respuesta.status, datos: datos };
@@ -133,6 +139,66 @@ async function generarVoz(texto, voz, estilo, clave) {
   return ultimo;
 }
 
+/* ---------------- Imágenes (Workers AI de Cloudflare) ---------------- */
+
+var MODELO_IMAGEN = '@cf/black-forest-labs/flux-2-klein-4b';
+var MAX_CARACTERES_IMAGEN = 2000;      // largo máximo de la descripción de la imagen
+var MAX_BYTES_REFERENCIA = 400000;     // tamaño máximo de la imagen de referencia
+
+function base64ABlob(b64, tipo) {
+  var binario = atob(b64);
+  var bytes = new Uint8Array(binario.length);
+  for (var i = 0; i < binario.length; i++) bytes[i] = binario.charCodeAt(i);
+  return new Blob([bytes], { type: tipo });
+}
+
+// Traduce los errores de Workers AI a mensajes claros.
+function errorDeImagen(e) {
+  var texto = String((e && e.message) || e || '');
+  if (/3030|nsfw|safety|flagged|reject/i.test(texto)) {
+    return { estado: 422, error: 'El filtro de seguridad bloqueó esta imagen. Pulsa regenerar o suaviza la descripción (menos sangre o violencia explícita).' };
+  }
+  if (/neuron|4006|daily|allocation|quota/i.test(texto)) {
+    return { estado: 429, error: 'Se alcanzó el límite gratuito diario de imágenes de Cloudflare. Se renueva cada día a las 00:00 UTC (las 7 de la tarde en Colombia o Perú).' };
+  }
+  return { estado: 502, error: 'No se pudo generar la imagen: ' + texto.slice(0, 200) };
+}
+
+async function generarImagen(env, cuerpo) {
+  var prompt = typeof cuerpo.prompt === 'string' ? cuerpo.prompt.trim() : '';
+  var ancho = Number(cuerpo.ancho), alto = Number(cuerpo.alto);
+  var semilla = Number(cuerpo.semilla);
+  if (!prompt) return { estado: 400, error: 'Falta la descripción de la imagen' };
+  if (prompt.length > MAX_CARACTERES_IMAGEN) return { estado: 400, error: 'La descripción de la imagen es demasiado larga' };
+  if (!(ancho >= 256 && ancho <= 1920 && alto >= 256 && alto <= 1920 && ancho % 16 === 0 && alto % 16 === 0)) {
+    return { estado: 400, error: 'Tamaño de imagen no válido' };
+  }
+
+  var form = new FormData();
+  form.append('prompt', prompt);
+  form.append('width', String(ancho));
+  form.append('height', String(alto));
+  if (Number.isInteger(semilla) && semilla >= 0 && semilla < 2147483647) form.append('seed', String(semilla));
+  if (typeof cuerpo.referencia === 'string' && cuerpo.referencia) {
+    if (cuerpo.referencia.length > MAX_BYTES_REFERENCIA * 1.4 || !/^[A-Za-z0-9+\/=]+$/.test(cuerpo.referencia)) {
+      return { estado: 400, error: 'Imagen de referencia no válida' };
+    }
+    form.append('input_image_0', base64ABlob(cuerpo.referencia, 'image/jpeg'));
+  }
+
+  // FormData debe convertirse en un cuerpo con su "boundary" para Workers AI.
+  var formulario = new Response(form);
+  try {
+    var resultado = await env.AI.run(MODELO_IMAGEN, {
+      multipart: { body: formulario.body, contentType: formulario.headers.get('content-type') }
+    });
+    if (!resultado || !resultado.image) return { estado: 502, error: 'Cloudflare no devolvió ninguna imagen' };
+    return { estado: 200, datos: { imagen: resultado.image } };
+  } catch (e) {
+    return errorDeImagen(e);
+  }
+}
+
 function cabecerasCors(origen) {
   return {
     'Access-Control-Allow-Origin': origen,
@@ -171,6 +237,12 @@ export default {
       return responder({ error: 'Pedido no válido' }, 400, origen);
     }
 
+    if (cuerpo.accion === 'imagen') {
+      if (!env.AI) return responder({ error: 'Falta conectar Workers AI al Worker (conexión llamada AI en Settings → Bindings).' }, 500, origen);
+      var imagen = await generarImagen(env, cuerpo);
+      return responder(imagen.estado === 200 ? imagen.datos : { error: imagen.error }, imagen.estado, origen);
+    }
+
     if (cuerpo.accion === 'voces') {
       var lista = await listarVoces(env.GEMINI_API_KEY);
       return responder(lista.datos, lista.estado, origen);
@@ -198,10 +270,13 @@ export default {
     }
 
     // Prueba cada modelo; si está ocupado, reintenta una vez y luego pasa al siguiente.
+    var inicio = Date.now();
     var ultimo = { estado: 503, datos: {} };
     for (var i = 0; i < MODELOS.length; i++) {
       for (var intento = 0; intento < 2; intento++) {
-        var r = await pedirAGemini(MODELOS[i], texto, env.GEMINI_API_KEY);
+        var queda = TIEMPO_TOTAL - (Date.now() - inicio);
+        if (queda < 3000) break;
+        var r = await pedirAGemini(MODELOS[i], texto, env.GEMINI_API_KEY, cuerpo.json === true, queda);
         if (r.estado === 200) {
           var partes = (((r.datos.candidates || [])[0] || {}).content || {}).parts || [];
           var resultado = partes.map(function (p) { return p.text || ''; }).join('');
@@ -214,6 +289,7 @@ export default {
       }
       // Clave inválida o pedido mal formado: otro modelo no lo arreglará.
       if (ultimo.estado === 400 || ultimo.estado === 401 || ultimo.estado === 403) break;
+      if (TIEMPO_TOTAL - (Date.now() - inicio) < 3000) break;
     }
 
     var mensaje = (ultimo.datos.error && ultimo.datos.error.message) || 'Gemini no respondió';

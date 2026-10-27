@@ -213,6 +213,7 @@
           clearTimeout(editor.temporizador);
           editor = null;
         }
+        Imagenes.borrar(id).catch(function () { /* sin imágenes guardadas */ });
         if (Storage.eliminar(id)) aviso('Proyecto eliminado');
         else aviso('No se pudo eliminar el proyecto', 'error');
         if (ruta().vista === 'editor') location.hash = '#proyectos';
@@ -337,6 +338,7 @@
           '<div class="feature"><div class="feature-icon">💡</div><h3>Generador de ideas con IA</h3><p>Ideas nuevas con Gemini o al azar. Seis subgéneros: paranormal, psicológico, leyendas urbanas, misterios, folclore y grabaciones encontradas.</p></div>' +
           '<div class="feature"><div class="feature-icon">🎬</div><h3>Editor de escenas</h3><p>Reordena, duplica y elimina escenas. Calcula palabras y duración estimada de la narración.</p></div>' +
           '<div class="feature"><div class="feature-icon">🎙️</div><h3>Voces con IA</h3><p>Convierte la narración en audio con voces masculinas y femeninas, escúchala y descárgala en MP3.</p></div>' +
+          '<div class="feature"><div class="feature-icon">🖼️</div><h3>Imágenes con IA</h3><p>Ilustra cada escena con imágenes cinematográficas y oscuras en 16:9, con personajes coherentes.</p></div>' +
           '<div class="feature"><div class="feature-icon">💾</div><h3>Guardado automático</h3><p>Tus proyectos se guardan solos en este navegador mientras escribes.</p></div>' +
           '<div class="feature"><div class="feature-icon">📱</div><h3>En cualquier pantalla</h3><p>Funciona en computadoras, tabletas y teléfonos.</p></div>' +
         '</div>' +
@@ -344,7 +346,7 @@
 
       '<section class="section roadmap">' +
         '<strong>Próximas etapas de la fábrica</strong> <span class="badge-soon">aún no disponibles</span>' +
-        '<ul><li>Imágenes y montaje del video</li></ul>' +
+        '<ul><li>Montaje del video</li></ul>' +
       '</section>';
   }
 
@@ -494,11 +496,32 @@
           '</div>' +
           '<div class="scene-list" id="listaEscenas"></div>' +
           '<button type="button" class="btn add-scene-big" data-action="agregar-escena">+ Añadir escena al final</button>' +
+          '<div class="imagenes-seccion">' +
+            '<div class="scenes-head"><h2>🖼️ Imágenes de la historia</h2></div>' +
+            '<div class="img-controles">' +
+              '<label>Formato<select id="imgFormato">' + Object.keys(Imagenes.FORMATOS).map(function (k) {
+                return '<option value="' + esc(k) + '">' + esc(Imagenes.FORMATOS[k].nombre) + '</option>';
+              }).join('') + '</select></label>' +
+              '<label>Imágenes por escena<select id="imgPorEscena"><option value="1">1</option><option value="2" selected>2</option><option value="3">3</option></select></label>' +
+              '<label class="check"><input type="checkbox" id="imgReferencia" checked> Usar la primera imagen como referencia de personajes</label>' +
+            '</div>' +
+            '<div class="img-acciones">' +
+              '<button type="button" class="btn" data-action="img-plan">🧠 1. Crear descripciones visuales con IA</button>' +
+              '<button type="button" class="btn btn-primary" data-action="img-generar">🖼️ 2. Generar imágenes</button>' +
+              '<button type="button" class="btn btn-ghost" data-action="img-detener" hidden>⏹ Detener</button>' +
+              '<button type="button" class="btn" data-action="img-descargar-todas" hidden>⬇ Descargar todas</button>' +
+            '</div>' +
+            '<div id="imgProgreso" class="voz-progreso" hidden><progress max="1" value="0"></progress><p class="hint" id="imgMensaje"></p></div>' +
+            '<div id="galeria" class="galeria"></div>' +
+            '<p class="hint">Las descripciones las escribe Gemini; las imágenes, Workers AI de Cloudflare (unas 90 gratis al día en 16:9). ' +
+              'Se guardan en este navegador: descárgalas para no perderlas.</p>' +
+          '</div>' +
         '</section>' +
       '</div>';
 
     pintarEscenas();
     prepararPanelVoz();
+    prepararImagenes(p);
   }
 
   function pintarEscenas() {
@@ -945,6 +968,245 @@
     });
   }
 
+  /* ---------------- Imágenes ---------------- */
+
+  var galeria = null;        // galería del proyecto abierto
+  var imgOcupada = false;
+  var imgDetener = false;
+  var urlsGaleria = [];      // direcciones temporales de las imágenes mostradas
+
+  function prepararImagenes(p) {
+    galeria = null;
+    pintarGaleria();
+    Imagenes.cargar(p.id).then(function (g) {
+      if (!editor || editor.proyecto.id !== p.id) return;
+      galeria = g;
+      if (g && Imagenes.FORMATOS[g.formato]) document.getElementById('imgFormato').value = g.formato;
+      pintarGaleria();
+    }, function (err) {
+      aviso(err.message, 'error');
+    });
+  }
+
+  function numeroEscena(escenaId) {
+    var i = editor ? editor.proyecto.escenas.findIndex(function (e) { return e.id === escenaId; }) : -1;
+    return i + 1;
+  }
+
+  function pintarGaleria() {
+    var cont = document.getElementById('galeria');
+    if (!cont) return;
+    urlsGaleria.forEach(function (u) { URL.revokeObjectURL(u); });
+    urlsGaleria = [];
+    var todas = document.querySelector('[data-action="img-descargar-todas"]');
+
+    if (!galeria || !galeria.tomas.length) {
+      cont.innerHTML = '<div class="empty galeria-vacia"><div class="empty-icon">🖼️</div>' +
+        '<p>Aún no hay imágenes. Primero escribe el guion; luego pulsa <strong>1. Crear descripciones visuales</strong> y <strong>2. Generar imágenes</strong>.</p></div>';
+      if (todas) todas.hidden = true;
+      return;
+    }
+    var formato = Imagenes.FORMATOS[galeria.formato] || Imagenes.FORMATOS['16:9'];
+    var contador = {};
+    cont.innerHTML = galeria.tomas.map(function (t) {
+      var n = numeroEscena(t.escenaId);
+      contador[n] = (contador[n] || 0) + 1;
+      var url = '';
+      if (t.imagen) { url = URL.createObjectURL(t.imagen); urlsGaleria.push(url); }
+      return '' +
+        '<figure class="toma" data-toma="' + esc(t.id) + '">' +
+          '<div class="toma-imagen" style="aspect-ratio:' + formato.ancho + '/' + formato.alto + '">' +
+            (url ? '<img src="' + url + '" alt="' + esc(t.descripcion) + '" loading="lazy">'
+              : '<div class="toma-vacia' + (t.error ? ' con-error' : '') + '">' + esc(t.error || 'Pendiente') + '</div>') +
+          '</div>' +
+          '<figcaption>' +
+            '<strong>' + (n ? 'Escena ' + n + ' · imagen ' + contador[n] : 'Escena eliminada') + '</strong>' +
+            '<span>' + esc(t.descripcion) + '</span>' +
+          '</figcaption>' +
+          '<div class="toma-acciones">' +
+            '<button type="button" class="btn btn-sm" data-action="img-regenerar">↻ ' + (t.imagen ? 'Regenerar' : 'Generar') + '</button>' +
+            (t.imagen ? '<button type="button" class="btn btn-sm" data-action="img-descargar">⬇ Descargar</button>' : '') +
+          '</div>' +
+        '</figure>';
+    }).join('');
+    if (todas) todas.hidden = !galeria.tomas.some(function (t) { return t.imagen; });
+  }
+
+  function marcarImgOcupada(ocupada) {
+    imgOcupada = ocupada;
+    Array.prototype.forEach.call(document.querySelectorAll('[data-action^="img-"]:not([data-action="img-detener"]), #imgFormato, #imgPorEscena'), function (b) {
+      b.disabled = ocupada;
+    });
+    var detener = document.querySelector('[data-action="img-detener"]');
+    if (detener) { detener.hidden = !ocupada; detener.disabled = false; }
+  }
+
+  function progresoImg(fraccion, mensaje) {
+    var caja = document.getElementById('imgProgreso');
+    if (!caja) return;
+    caja.hidden = fraccion === null;
+    if (fraccion === null) return;
+    caja.querySelector('progress').value = fraccion;
+    document.getElementById('imgMensaje').textContent = mensaje;
+  }
+
+  // Paso 1: Gemini crea el plan visual (personajes, lugares, estilo y tomas).
+  function crearPlanVisual() {
+    if (!editor) return Promise.resolve(false);
+    var proyecto = editor.proyecto;
+    var hayImagenes = galeria && galeria.tomas.some(function (t) { return t.imagen; });
+    var seguir = hayImagenes
+      ? confirmar('¿Crear descripciones nuevas?', 'Se borrarán las imágenes actuales de este proyecto (descárgalas antes si quieres conservarlas).', 'Crear nuevas')
+      : Promise.resolve(true);
+
+    return seguir.then(function (ok) {
+      if (!ok) return false;
+      guardarPendiente();
+      marcarImgOcupada(true);
+      progresoImg(0.05, '🧠 Gemini está analizando la historia y describiendo cada imagen… (puede tardar hasta un minuto)');
+      var porEscena = Number(document.getElementById('imgPorEscena').value) || 2;
+      var formato = document.getElementById('imgFormato').value;
+      return Imagenes.planificar(proyecto, porEscena).then(function (plan) {
+        var nueva = Imagenes.nuevaGaleria(proyecto.id, formato, plan);
+        return Imagenes.guardar(nueva).then(function () {
+          if (!editor || editor.proyecto !== proyecto) return false;
+          galeria = nueva;
+          // Copia las descripciones al campo "Visual" de las escenas que lo tengan vacío.
+          var cambio = false;
+          proyecto.escenas.forEach(function (e) {
+            if (e.visual.trim()) return;
+            var textos = nueva.tomas.filter(function (t) { return t.escenaId === e.id; }).map(function (t) { return t.descripcion; });
+            if (textos.length) { e.visual = textos.join('\n'); cambio = true; }
+          });
+          if (cambio) { cambioEnEditor(); pintarEscenas(); }
+          pintarGaleria();
+          aviso(nueva.tomas.length + ' descripciones visuales listas');
+          return true;
+        });
+      }).catch(function (err) {
+        aviso(err.message, 'error');
+        return false;
+      }).finally(function () {
+        progresoImg(null);
+        marcarImgOcupada(false);
+      });
+    });
+  }
+
+  function generarUna(toma, semilla) {
+    var usarReferencia = document.getElementById('imgReferencia');
+    var base = usarReferencia && usarReferencia.checked ? Imagenes.primeraImagen(galeria, toma.id) : null;
+    var actual = galeria;
+    return (base ? Imagenes.referenciaDesde(base) : Promise.resolve(null)).then(function (ref) {
+      return Imagenes.generarToma(toma, actual, ref, semilla);
+    }).then(function (blob) {
+      toma.imagen = blob;
+      toma.error = '';
+      return Imagenes.guardar(actual);
+    }, function (err) {
+      toma.error = err.message;
+      Imagenes.guardar(actual).catch(function () {});
+      throw err;
+    });
+  }
+
+  // Paso 2: dibuja todas las tomas que aún no tienen imagen.
+  function generarImagenes() {
+    if (imgOcupada || !editor) return;
+    var proyecto = editor.proyecto;
+    var preparar = galeria && galeria.tomas.length ? Promise.resolve(true) : crearPlanVisual();
+    preparar.then(function (ok) {
+      if (!ok || !galeria || !editor || editor.proyecto !== proyecto) return;
+      galeria.formato = document.getElementById('imgFormato').value;
+      var pendientes = galeria.tomas.filter(function (t) { return !t.imagen; });
+      if (!pendientes.length) { aviso('Todas las imágenes ya están generadas. Usa "Regenerar" en la que quieras cambiar.'); return; }
+
+      imgDetener = false;
+      marcarImgOcupada(true);
+      var hechas = 0, fallidas = 0, k = 0;
+      function siguiente() {
+        if (!editor || editor.proyecto !== proyecto) return Promise.resolve();
+        if (imgDetener || k >= pendientes.length) return Promise.resolve();
+        progresoImg(k / pendientes.length, '🖼️ Generando imagen ' + (k + 1) + ' de ' + pendientes.length + '… (unos segundos cada una)');
+        var toma = pendientes[k++];
+        return generarUna(toma).then(function () {
+          hechas++;
+        }, function (err) {
+          fallidas++;
+          if (err.estado === 429) { imgDetener = true; aviso(err.message, 'error'); }
+        }).then(function () {
+          pintarGaleria();
+          return siguiente();
+        });
+      }
+      return siguiente().then(function () {
+        if (hechas) aviso(hechas + ' imagen' + (hechas === 1 ? '' : 'es') + ' generada' + (hechas === 1 ? '' : 's') + (fallidas ? ' · ' + fallidas + ' con error' : ''));
+        else if (fallidas) aviso('No se pudo generar ninguna imagen. Revisa el mensaje en cada tarjeta.', 'error');
+      }).finally(function () {
+        progresoImg(null);
+        marcarImgOcupada(false);
+      });
+    });
+  }
+
+  function tomaDeBoton(boton) {
+    var fig = boton.closest('[data-toma]');
+    if (!fig || !galeria) return null;
+    var id = fig.getAttribute('data-toma');
+    return galeria.tomas.find(function (t) { return t.id === id; }) || null;
+  }
+
+  function regenerarImagen(boton) {
+    if (imgOcupada) return;
+    var toma = tomaDeBoton(boton);
+    if (!toma) return;
+    galeria.formato = document.getElementById('imgFormato').value;
+    marcarImgOcupada(true);
+    boton.textContent = '⏳ Generando…';
+    // Otra semilla para que salga una imagen distinta.
+    generarUna(toma, toma.imagen ? Math.floor(Math.random() * 2000000000) : undefined).then(function () {
+      aviso('Imagen generada');
+    }, function (err) {
+      aviso(err.message, 'error');
+    }).finally(function () {
+      marcarImgOcupada(false);
+      pintarGaleria();
+    });
+  }
+
+  function nombreImagen(toma, indice) {
+    var base = nombreArchivo(editor ? editor.proyecto.titulo : 'imagen').replace(/\.txt$/, '');
+    var ext = toma.imagen.type === 'image/png' ? '.png' : toma.imagen.type === 'image/webp' ? '.webp' : '.jpg';
+    var n = numeroEscena(toma.escenaId);
+    return base + '-' + String(indice + 1).padStart(2, '0') + (n ? '-escena-' + n : '') + ext;
+  }
+
+  function descargarBlob(blob, nombre) {
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = nombre;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+  }
+
+  function descargarImagen(boton) {
+    var toma = tomaDeBoton(boton);
+    if (toma && toma.imagen) descargarBlob(toma.imagen, nombreImagen(toma, galeria.tomas.indexOf(toma)));
+  }
+
+  function descargarTodas() {
+    if (!galeria) return;
+    var lista = galeria.tomas.filter(function (t) { return t.imagen; });
+    lista.forEach(function (t, i) {
+      // Pequeña pausa entre descargas para que el navegador no las bloquee.
+      setTimeout(function () { descargarBlob(t.imagen, nombreImagen(t, galeria.tomas.indexOf(t))); }, i * 400);
+    });
+    if (lista.length) aviso('Descargando ' + lista.length + ' imágenes. Si el navegador pregunta, permite las descargas múltiples.');
+  }
+
   /* ---------------- Navegación ---------------- */
 
   function ruta() {
@@ -1011,6 +1273,16 @@
         mostrarProgreso(0, 'Cancelando al terminar la parte actual…');
         break;
       case 'voz-descargar': descargarMp3(boton); break;
+      case 'img-plan': if (!imgOcupada) crearPlanVisual(); break;
+      case 'img-generar': generarImagenes(); break;
+      case 'img-detener':
+        imgDetener = true;
+        boton.disabled = true;
+        progresoImg(0, 'Deteniendo al terminar la imagen actual…');
+        break;
+      case 'img-regenerar': regenerarImagen(boton); break;
+      case 'img-descargar': descargarImagen(boton); break;
+      case 'img-descargar-todas': descargarTodas(); break;
       case 'copiar-idea':
         copiarTexto(Ideas.comoTexto(ideaActual)).then(function (ok) {
           aviso(ok ? 'Idea copiada al portapapeles' : 'No se pudo copiar la idea', ok ? '' : 'error');

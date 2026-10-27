@@ -26,7 +26,8 @@ var IA = (function () {
     return 'No se pudo generar el texto: ' + (texto || 'error desconocido') + '.';
   }
 
-  function pedir(prompt) {
+  // opciones.json: pide a Gemini que responda solo con JSON.
+  function pedir(prompt, opciones) {
     if (location.protocol === 'file:') {
       return Promise.reject(new Error('La IA solo funciona desde tu página publicada en GitHub Pages, no abriendo el archivo en tu computadora.'));
     }
@@ -36,7 +37,7 @@ var IA = (function () {
     return fetch(URL_INTERMEDIARIO, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ prompt: prompt }),
+      body: JSON.stringify({ prompt: prompt, json: !!(opciones && opciones.json) }),
       signal: control ? control.signal : undefined
     }).then(function (r) {
       return r.json().catch(function () { return {}; }).then(function (datos) {
@@ -128,6 +129,8 @@ var IA = (function () {
   }
 
   return {
+    pedir: pedir,
+    leerJSON: leerJSON,
     generarIdea: generarIdea,
     escribirNarracion: escribirNarracion
   };

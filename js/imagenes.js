@@ -27,48 +27,18 @@ var Imagenes = (function () {
     'deep shadows, desaturated cold colors, subtle film grain, shallow depth of field, 35mm lens, atmospheric fog, ' +
     'unsettling and eerie mood, highly detailed, no text, no letters, no watermark.';
 
-  /* ---------------- Almacenamiento (IndexedDB) ---------------- */
-
-  var promesaBD = null;
-  function bd() {
-    if (!promesaBD) {
-      promesaBD = new Promise(function (resolver, rechazar) {
-        if (!window.indexedDB) { rechazar(new Error('Este navegador no permite guardar imágenes.')); return; }
-        var pet = indexedDB.open('fabricaOscura', 1);
-        pet.onupgradeneeded = function () { pet.result.createObjectStore('imagenes', { keyPath: 'proyectoId' }); };
-        pet.onsuccess = function () { resolver(pet.result); };
-        pet.onerror = function () { promesaBD = null; rechazar(new Error('No se pudo abrir el almacén de imágenes del navegador.')); };
-      });
-    }
-    return promesaBD;
-  }
-
-  function operar(modo, accion) {
-    return bd().then(function (db) {
-      return new Promise(function (resolver, rechazar) {
-        var tx = db.transaction('imagenes', modo);
-        var pet = accion(tx.objectStore('imagenes'));
-        tx.oncomplete = function () { resolver(pet && pet.result); };
-        tx.onerror = tx.onabort = function () {
-          var e = tx.error;
-          rechazar(new Error(e && e.name === 'QuotaExceededError'
-            ? 'El navegador se quedó sin espacio para guardar imágenes. Descarga y borra las de otros proyectos.'
-            : 'No se pudieron guardar las imágenes en el navegador.'));
-        };
-      });
-    });
-  }
+  /* ---------------- Almacenamiento (js/almacen.js) ---------------- */
 
   function cargar(proyectoId) {
-    return operar('readonly', function (s) { return s.get(proyectoId); }).then(function (r) { return r || null; });
+    return Almacen.obtener('imagenes', proyectoId);
   }
 
   function guardar(galeria) {
-    return operar('readwrite', function (s) { return s.put(galeria); });
+    return Almacen.poner('imagenes', galeria);
   }
 
   function borrar(proyectoId) {
-    return operar('readwrite', function (s) { return s.delete(proyectoId); });
+    return Almacen.borrar('imagenes', proyectoId);
   }
 
   /* ---------------- Plan visual con Gemini ---------------- */

@@ -277,21 +277,22 @@ var Voz = (function () {
   }
 
   // Narra todas las escenas. alProgreso({ hecho, total, mensaje }). cancelado() → true para detener.
+  // Devuelve también "segmentos": qué texto suena en qué segundo (para subtítulos y video).
   function narrarProyecto(proyecto, voz, estilo, alProgreso, cancelado) {
     var trabajos = [];
     proyecto.escenas.forEach(function (e, i) {
       dividir(e.narracion || '').forEach(function (t, j) {
-        trabajos.push({ texto: t, escena: i + 1, primeroDeEscena: j === 0 });
+        trabajos.push({ texto: t, escena: i + 1, escenaId: e.id, primeroDeEscena: j === 0 });
       });
     });
     if (!trabajos.length) return Promise.reject(new Error('Ninguna escena tiene narración. Escríbela o genérala con IA primero.'));
 
-    var partes = [], frecuencia = 24000, k = 0;
+    var partes = [], segmentos = [], frecuencia = 24000, posicion = 0, k = 0;
     function siguiente() {
       if (cancelado && cancelado()) return Promise.reject(new Error('Generación de audio cancelada.'));
       if (k >= trabajos.length) {
         var muestras = unir(partes);
-        return { muestras: muestras, frecuencia: frecuencia, duracion: muestras.length / frecuencia };
+        return { muestras: muestras, frecuencia: frecuencia, duracion: muestras.length / frecuencia, segmentos: segmentos };
       }
       var t = trabajos[k];
       alProgreso({ hecho: k, total: trabajos.length, mensaje: 'Generando voz: escena ' + t.escena + ' (parte ' + (k + 1) + ' de ' + trabajos.length + ')…' });
@@ -299,8 +300,14 @@ var Voz = (function () {
         alProgreso({ hecho: k, total: trabajos.length, mensaje: 'Límite por minuto de Gemini alcanzado. Reintentando en ' + s + ' s…' });
       }).then(function (a) {
         frecuencia = a.frecuencia;
-        if (t.primeroDeEscena && partes.length) partes.push(new Int16Array(Math.round(PAUSA_ENTRE_ESCENAS * frecuencia)));
+        if (t.primeroDeEscena && partes.length) {
+          var pausa = new Int16Array(Math.round(PAUSA_ENTRE_ESCENAS * frecuencia));
+          partes.push(pausa);
+          posicion += pausa.length;
+        }
+        segmentos.push({ escenaId: t.escenaId, texto: t.texto, inicio: posicion / frecuencia, fin: (posicion + a.muestras.length) / frecuencia });
         partes.push(a.muestras);
+        posicion += a.muestras.length;
         k++;
         return siguiente();
       });

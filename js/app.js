@@ -214,6 +214,7 @@
           editor = null;
         }
         Imagenes.borrar(id).catch(function () { /* sin imágenes guardadas */ });
+        Almacen.borrar('audios', id).catch(function () { /* sin audio guardado */ });
         if (Storage.eliminar(id)) aviso('Proyecto eliminado');
         else aviso('No se pudo eliminar el proyecto', 'error');
         if (ruta().vista === 'editor') location.hash = '#proyectos';
@@ -339,6 +340,7 @@
           '<div class="feature"><div class="feature-icon">🎬</div><h3>Editor de escenas</h3><p>Reordena, duplica y elimina escenas. Calcula palabras y duración estimada de la narración.</p></div>' +
           '<div class="feature"><div class="feature-icon">🎙️</div><h3>Voces con IA</h3><p>Convierte la narración en audio con voces masculinas y femeninas, escúchala y descárgala en MP3.</p></div>' +
           '<div class="feature"><div class="feature-icon">🖼️</div><h3>Imágenes con IA</h3><p>Ilustra cada escena con imágenes cinematográficas y oscuras en 16:9, con personajes coherentes.</p></div>' +
+          '<div class="feature"><div class="feature-icon">🎬</div><h3>Videos MP4</h3><p>Une imágenes con movimiento, narración, música y subtítulos en un video listo para YouTube.</p></div>' +
           '<div class="feature"><div class="feature-icon">💾</div><h3>Guardado automático</h3><p>Tus proyectos se guardan solos en este navegador mientras escribes.</p></div>' +
           '<div class="feature"><div class="feature-icon">📱</div><h3>En cualquier pantalla</h3><p>Funciona en computadoras, tabletas y teléfonos.</p></div>' +
         '</div>' +
@@ -346,7 +348,7 @@
 
       '<section class="section roadmap">' +
         '<strong>Próximas etapas de la fábrica</strong> <span class="badge-soon">aún no disponibles</span>' +
-        '<ul><li>Montaje del video</li></ul>' +
+        '<ul><li>Publicación directa en YouTube</li></ul>' +
       '</section>';
   }
 
@@ -479,7 +481,7 @@
             '</div>' +
             '<audio id="vozAudio" controls preload="metadata" hidden></audio>' +
             '<button type="button" class="btn btn-sm" data-action="voz-descargar" hidden>⬇ Descargar MP3</button>' +
-            '<p class="hint">La voz lee la narración de todas las escenas, en orden. El audio no se guarda: descárgalo antes de cerrar la página.</p>' +
+            '<p class="hint">La voz lee la narración de todas las escenas, en orden. El audio se guarda en este navegador y se usa para crear el video.</p>' +
           '</div>' +
         '</aside>' +
         '<section>' +
@@ -516,12 +518,42 @@
             '<p class="hint">Las descripciones las escribe Gemini; las imágenes, Workers AI de Cloudflare (unas 90 gratis al día en 16:9). ' +
               'Se guardan en este navegador: descárgalas para no perderlas.</p>' +
           '</div>' +
+          '<div class="video-seccion">' +
+            '<div class="scenes-head"><h2>🎬 Video MP4</h2></div>' +
+            '<ul class="requisitos" id="videoRequisitos"></ul>' +
+            '<div class="img-controles">' +
+              '<label>Formato<select id="videoFormato">' + Object.keys(Video.FORMATOS).map(function (k) {
+                return '<option value="' + esc(k) + '">' + esc(Video.FORMATOS[k].nombre) + '</option>';
+              }).join('') + '</select></label>' +
+              '<label>Música ambiental<select id="videoMusica">' + opciones(Video.MUSICAS, 'dron') + '</select></label>' +
+              '<label>Volumen de la música <span id="videoVolumenValor">25%</span><input type="range" id="videoVolumen" min="0" max="100" value="25"></label>' +
+              '<label id="videoArchivoCaja" hidden>Archivo de música<input type="file" id="videoArchivo" accept="audio/*"></label>' +
+              '<label class="check"><input type="checkbox" id="videoSubtitulos" checked> Subtítulos dentro del video</label>' +
+            '</div>' +
+            '<div class="img-acciones">' +
+              '<button type="button" class="btn" data-action="video-previa">👁 Vista previa (30 s)</button>' +
+              '<button type="button" class="btn btn-primary" data-action="video-crear">🎬 Crear video completo</button>' +
+              '<button type="button" class="btn btn-ghost" data-action="video-cancelar" hidden>⏹ Cancelar</button>' +
+            '</div>' +
+            '<div id="videoProgreso" class="voz-progreso" hidden><progress max="1" value="0"></progress><p class="hint" id="videoMensaje"></p></div>' +
+            '<div id="videoResultado" hidden>' +
+              '<video id="videoReproductor" controls playsinline></video>' +
+              '<div class="img-acciones">' +
+                '<button type="button" class="btn btn-primary" data-action="video-descargar">⬇ Descargar MP4</button>' +
+                '<button type="button" class="btn" data-action="video-srt">⬇ Subtítulos .srt (para YouTube)</button>' +
+              '</div>' +
+              '<p class="hint" id="videoInfo"></p>' +
+            '</div>' +
+            '<p class="hint">El video se crea dentro de tu navegador (Chrome o Edge en computadora), sin servidores ni costos. ' +
+              'Un video de 10 minutos puede tardar varios minutos: no cierres la pestaña mientras se crea.</p>' +
+          '</div>' +
         '</section>' +
       '</div>';
 
     pintarEscenas();
     prepararPanelVoz();
     prepararImagenes(p);
+    actualizarRequisitosVideo();
   }
 
   function pintarEscenas() {
@@ -774,7 +806,7 @@
   var cargandoVoces = null;
   var vozOcupada = false;
   var vozCancelada = false;
-  var audioVoz = null;     // { proyectoId, muestras, frecuencia, url, mp3 }
+  var audioVoz = null;     // { proyectoId, wav, muestras?, frecuencia, segmentos, duracion, url, mp3 }
   var audioPrueba = null;  // URL de la última prueba
 
   // Google nombra sus voces en inglés; aquí se traducen para que se entiendan.
@@ -849,8 +881,24 @@
         pintarSelectVoces();
       });
     }
-    // Si ya se generó el audio de este proyecto en esta visita, se vuelve a mostrar.
-    if (audioVoz && editor && audioVoz.proyectoId === editor.proyecto.id) mostrarAudio(audioVoz.url);
+    // Si este proyecto ya tiene audio (en esta visita o guardado en el navegador), se vuelve a mostrar.
+    var id = editor.proyecto.id;
+    if (audioVoz && audioVoz.proyectoId === id) { mostrarAudio(audioVoz.url); return; }
+    Almacen.obtener('audios', id).then(function (guardado) {
+      if (!guardado || !editor || editor.proyecto.id !== id) return;
+      if (audioVoz) URL.revokeObjectURL(audioVoz.url);
+      audioVoz = {
+        proyectoId: id, wav: guardado.wav, frecuencia: guardado.frecuencia, segmentos: guardado.segmentos || [],
+        duracion: guardado.duracion, url: URL.createObjectURL(guardado.wav), mp3: null
+      };
+      mostrarAudio(audioVoz.url);
+    }, function () { /* sin audio guardado */ });
+  }
+
+  // Muestras de 16 bits del audio (el WAV guardado tiene 44 bytes de cabecera).
+  function muestrasDe(audio) {
+    if (audio.muestras) return Promise.resolve(audio.muestras);
+    return audio.wav.arrayBuffer().then(function (b) { return new Int16Array(b, 44, (b.byteLength - 44) >> 1); });
   }
 
   function vozElegida() {
@@ -885,6 +933,7 @@
     reproductor.src = url;
     reproductor.hidden = false;
     document.querySelector('[data-action="voz-descargar"]').hidden = false;
+    actualizarRequisitosVideo();
   }
 
   function probarVoz(boton) {
@@ -920,7 +969,16 @@
       if (editor && editor.proyecto === proyecto) mostrarProgreso(p.hecho / p.total, p.mensaje);
     }, function () { return vozCancelada; }).then(function (a) {
       if (audioVoz) URL.revokeObjectURL(audioVoz.url);
-      audioVoz = { proyectoId: proyecto.id, muestras: a.muestras, frecuencia: a.frecuencia, url: URL.createObjectURL(Voz.aWav(a.muestras, a.frecuencia)), mp3: null };
+      var wav = Voz.aWav(a.muestras, a.frecuencia);
+      audioVoz = {
+        proyectoId: proyecto.id, muestras: a.muestras, wav: wav, frecuencia: a.frecuencia, segmentos: a.segmentos,
+        duracion: a.duracion, url: URL.createObjectURL(wav), mp3: null
+      };
+      // Se guarda en el navegador para no perderlo y para poder crear el video después.
+      Almacen.poner('audios', {
+        proyectoId: proyecto.id, wav: wav, frecuencia: a.frecuencia, segmentos: a.segmentos,
+        duracion: a.duracion, creado: new Date().toISOString()
+      }).catch(function (err) { aviso(err.message, 'error'); });
       if (editor && editor.proyecto === proyecto) {
         mostrarAudio(audioVoz.url);
         aviso('Audio listo: ' + formatoDuracion(a.duracion * PALABRAS_POR_MINUTO / 60) + ' min');
@@ -953,8 +1011,10 @@
     boton.disabled = true;
     mostrarProgreso(0, 'Convirtiendo a MP3…');
     var actual = audioVoz;
-    Voz.aMp3(actual.muestras, actual.frecuencia, function (f) {
-      mostrarProgreso(f, 'Convirtiendo a MP3… ' + Math.round(f * 100) + '%');
+    muestrasDe(actual).then(function (muestras) {
+      return Voz.aMp3(muestras, actual.frecuencia, function (f) {
+        mostrarProgreso(f, 'Convirtiendo a MP3… ' + Math.round(f * 100) + '%');
+      });
     }).then(function (blob) {
       actual.mp3 = blob;
       bajar(blob);
@@ -1004,6 +1064,7 @@
       cont.innerHTML = '<div class="empty galeria-vacia"><div class="empty-icon">🖼️</div>' +
         '<p>Aún no hay imágenes. Primero escribe el guion; luego pulsa <strong>1. Crear descripciones visuales</strong> y <strong>2. Generar imágenes</strong>.</p></div>';
       if (todas) todas.hidden = true;
+      actualizarRequisitosVideo();
       return;
     }
     var formato = Imagenes.FORMATOS[galeria.formato] || Imagenes.FORMATOS['16:9'];
@@ -1030,6 +1091,7 @@
         '</figure>';
     }).join('');
     if (todas) todas.hidden = !galeria.tomas.some(function (t) { return t.imagen; });
+    actualizarRequisitosVideo();
   }
 
   function marcarImgOcupada(ocupada) {
@@ -1207,6 +1269,118 @@
     if (lista.length) aviso('Descargando ' + lista.length + ' imágenes. Si el navegador pregunta, permite las descargas múltiples.');
   }
 
+  /* ---------------- Video MP4 ---------------- */
+
+  var videoOcupado = false;
+  var videoCancelado = false;
+  var videoHecho = null;     // { proyectoId, blob, url, subtitulos, completo }
+
+  // Muestra qué falta para poder crear el video.
+  function actualizarRequisitosVideo() {
+    var lista = document.getElementById('videoRequisitos');
+    if (!lista || !editor) return;
+    var id = editor.proyecto.id;
+    var audio = audioVoz && audioVoz.proyectoId === id ? audioVoz : null;
+    var imagenes = galeria ? galeria.tomas.filter(function (t) { return t.imagen; }).length : 0;
+    var comp = Video.compatible();
+    var items = [
+      [!!audio, audio
+        ? 'Narración lista (' + formatoDuracion(audio.duracion * PALABRAS_POR_MINUTO / 60) + ' min)' +
+          (audio.segmentos && audio.segmentos.length ? '' : ' — sin datos de tiempo: vuelve a generar el audio para tener subtítulos')
+        : 'Falta la narración: genera el audio en "🎙️ Voz y audio"'],
+      [imagenes > 0, imagenes ? imagenes + ' imágenes listas' : 'Faltan las imágenes: genéralas en "🖼️ Imágenes de la historia"'],
+      [comp.ok, comp.ok ? 'Navegador compatible' : comp.motivo]
+    ];
+    lista.innerHTML = items.map(function (x) {
+      return '<li class="' + (x[0] ? 'ok' : 'falta') + '">' + (x[0] ? '✅ ' : '❌ ') + esc(x[1]) + '</li>';
+    }).join('');
+    var listo = items.every(function (x) { return x[0]; });
+    Array.prototype.forEach.call(document.querySelectorAll('[data-action="video-previa"], [data-action="video-crear"]'), function (b) {
+      b.disabled = !listo || videoOcupado;
+    });
+    if (videoHecho && videoHecho.proyectoId === id) mostrarVideo();
+  }
+
+  function progresoVideo(fraccion, mensaje) {
+    var caja = document.getElementById('videoProgreso');
+    if (!caja) return;
+    caja.hidden = fraccion === null;
+    if (fraccion === null) return;
+    caja.querySelector('progress').value = fraccion;
+    document.getElementById('videoMensaje').textContent = mensaje;
+  }
+
+  function mostrarVideo() {
+    var caja = document.getElementById('videoResultado');
+    if (!caja || !videoHecho) return;
+    var rep = document.getElementById('videoReproductor');
+    if (rep.src !== videoHecho.url) rep.src = videoHecho.url;
+    caja.hidden = false;
+    document.querySelector('[data-action="video-srt"]').hidden = !videoHecho.subtitulos;
+    document.getElementById('videoInfo').textContent = (videoHecho.completo ? 'Video completo' : 'Vista previa de 30 segundos') +
+      ' · ' + formatoDuracion(videoHecho.duracion * PALABRAS_POR_MINUTO / 60) + ' min · ' +
+      (videoHecho.blob.size / 1048576).toFixed(1) + ' MB';
+  }
+
+  function crearVideo(completo) {
+    if (videoOcupado || !editor) return;
+    var proyecto = editor.proyecto;
+    var audio = audioVoz && audioVoz.proyectoId === proyecto.id ? audioVoz : null;
+    if (!audio || !galeria) { actualizarRequisitosVideo(); return; }
+    var tipoMusica = document.getElementById('videoMusica').value;
+    var archivo = document.getElementById('videoArchivo').files[0] || null;
+
+    videoOcupado = true;
+    videoCancelado = false;
+    document.querySelector('[data-action="video-cancelar"]').hidden = false;
+    actualizarRequisitosVideo();
+    progresoVideo(0, 'Preparando…');
+
+    muestrasDe(audio).then(function (muestras) {
+      return Video.crear({
+        muestras: muestras,
+        frecuencia: audio.frecuencia,
+        segmentos: audio.segmentos,
+        escenaIds: proyecto.escenas.map(function (e) { return e.id; }),
+        tomas: galeria.tomas,
+        formato: document.getElementById('videoFormato').value,
+        musica: { tipo: tipoMusica, volumen: Number(document.getElementById('videoVolumen').value) / 100, archivo: archivo },
+        subtitulos: document.getElementById('videoSubtitulos').checked,
+        limite: completo ? 0 : 30
+      }, function (f, msg) {
+        if (editor && editor.proyecto === proyecto) progresoVideo(f, msg);
+      }, function () { return videoCancelado; });
+    }).then(function (r) {
+      if (videoHecho) URL.revokeObjectURL(videoHecho.url);
+      videoHecho = { proyectoId: proyecto.id, blob: r.blob, url: URL.createObjectURL(r.blob), subtitulos: r.subtitulos, duracion: r.duracion, completo: completo };
+      if (editor && editor.proyecto === proyecto) {
+        mostrarVideo();
+        aviso(completo ? 'Video creado. Revísalo y descárgalo.' : 'Vista previa lista');
+      }
+    }, function (err) {
+      aviso(err.message, 'error');
+    }).finally(function () {
+      videoOcupado = false;
+      progresoVideo(null);
+      var cancelar = document.querySelector('[data-action="video-cancelar"]');
+      if (cancelar) cancelar.hidden = true;
+      actualizarRequisitosVideo();
+    });
+  }
+
+  function descargarVideo() {
+    if (!videoHecho) return;
+    var base = nombreArchivo(editor ? editor.proyecto.titulo : 'video').replace(/\.txt$/, '');
+    if (!videoHecho.completo) aviso('Ojo: estás descargando la vista previa de 30 segundos, no el video completo.');
+    descargarBlob(videoHecho.blob, base + (videoHecho.completo ? '' : '-vista-previa') + '.mp4');
+  }
+
+  function descargarSRT() {
+    if (!videoHecho || !videoHecho.subtitulos) return;
+    var base = nombreArchivo(editor ? editor.proyecto.titulo : 'video').replace(/\.txt$/, '');
+    descargarBlob(new Blob([Video.aSRT(videoHecho.subtitulos)], { type: 'text/plain;charset=utf-8' }), base + '.srt');
+  }
+
   /* ---------------- Navegación ---------------- */
 
   function ruta() {
@@ -1283,6 +1457,14 @@
       case 'img-regenerar': regenerarImagen(boton); break;
       case 'img-descargar': descargarImagen(boton); break;
       case 'img-descargar-todas': descargarTodas(); break;
+      case 'video-previa': crearVideo(false); break;
+      case 'video-crear': crearVideo(true); break;
+      case 'video-cancelar':
+        videoCancelado = true;
+        progresoVideo(0, 'Cancelando…');
+        break;
+      case 'video-descargar': descargarVideo(); break;
+      case 'video-srt': descargarSRT(); break;
       case 'copiar-idea':
         copiarTexto(Ideas.comoTexto(ideaActual)).then(function (ok) {
           aviso(ok ? 'Idea copiada al portapapeles' : 'No se pudo copiar la idea', ok ? '' : 'error');
@@ -1321,6 +1503,9 @@
     if (!editor) return;
     if (t.id === 'vozSelect' || t.id === 'vozEstilo') { guardarEleccionVoz(); return; }
     if (t.id === 'duracionObjetivo') { duracionObjetivo = Number(t.value) || 10; return; }
+    if (t.id === 'videoVolumen') { document.getElementById('videoVolumenValor').textContent = t.value + '%'; return; }
+    if (t.id === 'videoMusica') { document.getElementById('videoArchivoCaja').hidden = t.value !== 'archivo'; return; }
+    if (t.id === 'videoFormato' || t.id === 'videoSubtitulos' || t.id === 'videoArchivo') return;
 
     var campo = t.getAttribute('data-field');
     if (campo) {

@@ -4,7 +4,7 @@
    El audio llega en WAV (24 kHz) y se convierte a MP3 en el
    propio navegador con lamejs (js/vendor/lame.min.js).
    Si Gemini alcanza su límite, se usa la voz de respaldo de
-   Cloudflare (MeloTTS), que llega en MP3 y se pasa a 24 kHz.
+   Cloudflare (MeloTTS), que llega en WAV o MP3 y se pasa a 24 kHz.
    ========================================================== */
 
 var Voz = (function () {
@@ -16,7 +16,8 @@ var Voz = (function () {
   var MAX_FRAGMENTO_CF = 1000;         // caracteres por pedido a Cloudflare
   var FRECUENCIA = 24000;              // muestras por segundo de todo el audio
   var PAUSA_ENTRE_ESCENAS = 0.8;       // segundos de silencio entre escenas
-  var ESPERA_POR_LIMITE = 60;          // segundos de espera si se alcanza el límite por minuto
+  var ESPERA_POR_LIMITE = 60;          // segundos de espera si Google no dice cuánto esperar
+  var ESPERA_MINIMA = 5;               // segundos mínimos de espera ante el límite por minuto
   var REINTENTOS_POR_LIMITE = 1;       // después se cambia a la voz de Cloudflare
   var CLAVE_PREFERENCIAS = 'fabricaOscura.voz.v1';
 
@@ -96,6 +97,7 @@ var Voz = (function () {
           var msg = typeof datos.error === 'string' ? datos.error : (datos.error && datos.error.message);
           var err = new Error(mensajeDeError(r.status, msg));
           err.estado = r.status;
+          err.original = msg || '';
           throw err;
         }
         return datos;
@@ -263,6 +265,13 @@ var Voz = (function () {
     });
   }
 
+  // Google suele decir cuánto esperar ("Please retry in 23.4s"). Si no lo dice, se esperan 60 s.
+  function segundosDeEspera(err) {
+    var m = /retry in ([\d.]+)\s*s/i.exec(err.original || '');
+    if (!m) return ESPERA_POR_LIMITE;
+    return Math.min(ESPERA_POR_LIMITE, Math.max(ESPERA_MINIMA, Math.ceil(parseFloat(m[1])) + 2));
+  }
+
   // Si el modelo de voz disponible no acepta la indicación de estilo, se deja de enviar
   // durante esta visita a la página (la voz elegida se mantiene).
   var estiloNoAdmitido = false;
@@ -289,7 +298,7 @@ var Voz = (function () {
         return sintetizar(texto, voz, estilo, alEsperar, intento);
       }
       if (err.estado === 429 && intento < REINTENTOS_POR_LIMITE) {
-        return esperar(ESPERA_POR_LIMITE, alEsperar).then(function () {
+        return esperar(segundosDeEspera(err), alEsperar).then(function () {
           return sintetizar(texto, voz, estilo, alEsperar, intento + 1);
         });
       }
@@ -362,9 +371,20 @@ var Voz = (function () {
         return { muestras: muestras, frecuencia: frecuencia, duracion: muestras.length / frecuencia, segmentos: segmentos };
       }
       var t = trabajos[k];
-      alProgreso({ hecho: k, total: trabajos.length, mensaje: quien + ': escena ' + t.escena + ' (parte ' + (k + 1) + ' de ' + trabajos.length + ')…' });
+      var texto = quien + ': escena ' + t.escena + ' (parte ' + (k + 1) + ' de ' + trabajos.length + ')…';
+      // Cada parte larga tarda casi un minuto: un contador de segundos muestra que sigue trabajando.
+      var inicio = Date.now(), esperando = false;
+      function mostrar() {
+        if (!esperando) alProgreso({ hecho: k, total: trabajos.length, mensaje: texto + ' lleva ' + Math.round((Date.now() - inicio) / 1000) + ' s' });
+      }
+      mostrar();
+      var reloj = setInterval(mostrar, 1000);
       return sintetizar(t.texto, voz, estilo, function (s) {
+        esperando = s > 0;
+        if (!esperando) inicio = Date.now();
         alProgreso({ hecho: k, total: trabajos.length, mensaje: 'Límite por minuto de Gemini alcanzado. Reintentando en ' + s + ' s…' });
+      }).finally(function () {
+        clearInterval(reloj);
       }).then(function (a) {
         frecuencia = a.frecuencia;
         if (t.primeroDeEscena && partes.length) {

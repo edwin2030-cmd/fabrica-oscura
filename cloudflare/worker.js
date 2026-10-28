@@ -130,7 +130,8 @@ async function generarVoz(texto, voz, estilo, clave) {
 
       var datos = await respuesta.json().catch(function () { return {}; });
       ultimo = { estado: respuesta.status, error: (datos.error && datos.error.message) || 'Gemini no respondió' };
-      if (!esPasajero(respuesta.status)) break;
+      // Límite alcanzado: reintentar el mismo modelo no sirve, se pasa al siguiente.
+      if (!esPasajero(respuesta.status) || respuesta.status === 429) break;
       if (intento === 0) await esperar(ESPERA_REINTENTO);
     }
     // Clave inválida o voz inexistente: otro modelo no lo arreglará.

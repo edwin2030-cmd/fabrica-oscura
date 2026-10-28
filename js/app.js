@@ -73,10 +73,16 @@
     el.className = 'toast' + (tipo === 'error' ? ' error' : '');
     el.textContent = mensaje;
     cont.appendChild(el);
-    setTimeout(function () {
+    // Los errores se quedan más tiempo para poder leerlos; con el ratón encima, el aviso no se va.
+    var quedan = tipo === 'error' ? 6000 : 3000, desde = Date.now(), temporizador;
+    function programar() { desde = Date.now(); temporizador = setTimeout(salir, quedan); }
+    function salir() {
       el.classList.add('saliendo');
-      setTimeout(function () { el.remove(); }, 300);
-    }, 2600);
+      setTimeout(function () { el.remove(); }, 200);
+    }
+    el.addEventListener('mouseenter', function () { clearTimeout(temporizador); quedan = Math.max(1000, quedan - (Date.now() - desde)); });
+    el.addEventListener('mouseleave', programar);
+    programar();
   }
 
   // Ventana de confirmación propia (más clara que window.confirm en móviles).
@@ -1061,6 +1067,9 @@
     return i + 1;
   }
 
+  // Imágenes ya mostradas: solo las nuevas aparecen con un fundido (no en cada redibujo).
+  var imagenesVistas = typeof WeakSet !== 'undefined' ? new WeakSet() : null;
+
   function pintarGaleria() {
     var cont = document.getElementById('galeria');
     if (!cont) return;
@@ -1081,11 +1090,16 @@
       var n = numeroEscena(t.escenaId);
       contador[n] = (contador[n] || 0) + 1;
       var url = '';
-      if (t.imagen) { url = URL.createObjectURL(t.imagen); urlsGaleria.push(url); }
+      var nueva = false;
+      if (t.imagen) {
+        url = URL.createObjectURL(t.imagen);
+        urlsGaleria.push(url);
+        if (imagenesVistas && !imagenesVistas.has(t.imagen)) { nueva = true; imagenesVistas.add(t.imagen); }
+      }
       return '' +
         '<figure class="toma" data-toma="' + esc(t.id) + '">' +
           '<div class="toma-imagen" style="aspect-ratio:' + formato.ancho + '/' + formato.alto + '">' +
-            (url ? '<img src="' + url + '" alt="' + esc(t.descripcion) + '" loading="lazy">'
+            (url ? '<img src="' + url + '" alt="' + esc(t.descripcion) + '" loading="lazy"' + (nueva ? ' class="img-nueva"' : '') + '>'
               : '<div class="toma-vacia' + (t.error ? ' con-error' : '') + '">' + esc(t.error || 'Pendiente') + '</div>') +
           '</div>' +
           '<figcaption>' +

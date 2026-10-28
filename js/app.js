@@ -845,6 +845,7 @@
   }
 
   function etiquetaVoz(v) {
+    if (v.proveedor === 'azure') return v.nombre;
     if (!v.latina) return v.nombre + ' — ' + v.descripcion;
     var nombre = v.nombre.replace(/^(.*?)(\s+\d+)?$/, function (_, tipo, num) {
       return (TIPOS_VOZ[tipo] || tipo) + (num || '');
@@ -863,15 +864,26 @@
     latinas.forEach(function (v) { if (paises.indexOf(paisVoz(v)) === -1) paises.push(paisVoz(v)); });
     paises.sort(function (a, b) { return (a === 'México' ? -1 : 0) - (b === 'México' ? -1 : 0); });
 
+    // Primero Azure (rápida y con mucho cupo gratis), México arriba.
     var grupos = [];
-    paises.forEach(function (pais) {
+    var azure = lista.filter(function (v) { return v.proveedor === 'azure'; });
+    var paisesAzure = [];
+    azure.forEach(function (v) { if (paisesAzure.indexOf(v.pais) === -1) paisesAzure.push(v.pais); });
+    paisesAzure.sort(function (a, b) { return a === 'México' ? -1 : b === 'México' ? 1 : a.localeCompare(b); });
+    paisesAzure.forEach(function (pais) {
       [['male', 'masculinas'], ['female', 'femeninas']].forEach(function (g) {
-        grupos.push([pais + ' — voces ' + g[1], latinas.filter(function (v) { return paisVoz(v) === pais && v.genero === g[0]; })]);
+        grupos.push(['⚡ Azure · ' + pais + ' — voces ' + g[1], azure.filter(function (v) { return v.pais === pais && v.genero === g[0]; })]);
       });
     });
-    grupos.push(['Voces básicas masculinas', lista.filter(function (v) { return !v.latina && v.genero === 'male'; })]);
-    grupos.push(['Voces básicas femeninas', lista.filter(function (v) { return !v.latina && v.genero === 'female'; })]);
-    grupos.push(['Respaldo (si Gemini está al límite)', [Voz.VOZ_CLOUDFLARE]]);
+
+    paises.forEach(function (pais) {
+      [['male', 'masculinas'], ['female', 'femeninas']].forEach(function (g) {
+        grupos.push(['Gemini · ' + pais + ' — voces ' + g[1], latinas.filter(function (v) { return paisVoz(v) === pais && v.genero === g[0]; })]);
+      });
+    });
+    grupos.push(['Gemini · voces básicas masculinas', lista.filter(function (v) { return !v.latina && !v.proveedor && v.genero === 'male'; })]);
+    grupos.push(['Gemini · voces básicas femeninas', lista.filter(function (v) { return !v.latina && !v.proveedor && v.genero === 'female'; })]);
+    grupos.push(['Respaldo (si las demás están al límite)', [Voz.VOZ_CLOUDFLARE]]);
 
     sel.innerHTML = grupos.filter(function (g) { return g[1].length; }).map(function (g) {
       return '<optgroup label="' + esc(g[0]) + '">' + g[1].map(function (v) {
@@ -994,7 +1006,7 @@
       if (editor && editor.proyecto === proyecto) {
         mostrarAudio(audioVoz.url);
         aviso(a.respaldo
-          ? 'Gemini llegó a su límite, así que se usó la voz de Cloudflare. Audio listo: ' + formatoDuracion(a.duracion * PALABRAS_POR_MINUTO / 60) + ' min'
+          ? 'La voz elegida llegó a su límite, así que se usó la voz de Cloudflare. Audio listo: ' + formatoDuracion(a.duracion * PALABRAS_POR_MINUTO / 60) + ' min'
           : 'Audio listo: ' + formatoDuracion(a.duracion * PALABRAS_POR_MINUTO / 60) + ' min');
       }
     }, function (err) {

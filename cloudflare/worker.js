@@ -5,6 +5,8 @@
    La clave de Gemini NO va aquí: se guarda en Cloudflare
    como secreto llamado GEMINI_API_KEY. Las imágenes usan la
    conexión (binding) de Workers AI llamada AI, sin clave.
+   Las voces de Microsoft Azure usan los secretos
+   AZURE_SPEECH_KEY y AZURE_SPEECH_REGION.
    ========================================================== */
 
 // Páginas que pueden usar este intermediario.
@@ -140,6 +142,78 @@ async function generarVoz(texto, voz, estilo, clave) {
   return ultimo;
 }
 
+/* ---------------- Voces de Microsoft Azure ---------------- */
+
+// Plan gratuito F0: 500 000 caracteres al mes, sin cobros. Necesita dos secretos en
+// Cloudflare: AZURE_SPEECH_KEY (la clave) y AZURE_SPEECH_REGION (por ejemplo eastus).
+var MAX_CARACTERES_AZURE = 3000;
+var TIEMPO_AZURE = 60000;
+
+// Ritmo y tono de cada estilo de la página (Azure no entiende instrucciones en texto).
+var PROSODIA_AZURE = {
+  narrador: { rate: '-12%', pitch: '-6%' },
+  susurro: { rate: '-15%', pitch: '-4%', volume: 'soft' },
+  tension: { rate: '+4%', pitch: '-2%' },
+  documental: { rate: '-5%', pitch: '-2%' },
+  melancolico: { rate: '-18%', pitch: '-8%' }
+};
+
+function urlAzure(env, ruta) {
+  return 'https://' + env.AZURE_SPEECH_REGION.trim() + '.tts.speech.microsoft.com/cognitiveservices/' + ruta;
+}
+
+function escaparXml(t) {
+  return t.replace(/[<>&'"]/g, function (c) {
+    return { '<': '&lt;', '>': '&gt;', '&': '&amp;', "'": '&apos;', '"': '&quot;' }[c];
+  });
+}
+
+function errorAzure(estado) {
+  if (estado === 401 || estado === 403) return 'La clave o la región de Azure no son correctas. Revisa los secretos AZURE_SPEECH_KEY y AZURE_SPEECH_REGION.';
+  if (estado === 429) return 'Se alcanzó el límite gratuito de Azure (por minuto o del mes).';
+  return 'Azure no pudo generar la voz (error ' + estado + ').';
+}
+
+// La lista se entrega tal cual (sin abrirla) para no gastar tiempo de proceso; la página la filtra.
+async function listarVocesAzure(env, origen) {
+  try {
+    var r = await fetch(urlAzure(env, 'voices/list'), {
+      headers: { 'Ocp-Apim-Subscription-Key': env.AZURE_SPEECH_KEY },
+      signal: AbortSignal.timeout(TIEMPO_POR_INTENTO)
+    });
+    if (!r.ok) return responder({ error: errorAzure(r.status) }, r.status, origen);
+    return new Response(r.body, { status: 200, headers: Object.assign({ 'Content-Type': 'application/json; charset=utf-8' }, cabecerasCors(origen)) });
+  } catch (e) {
+    return responder({ error: 'Azure tardó demasiado en responder' }, 504, origen);
+  }
+}
+
+// Devuelve el audio WAV (24 kHz, 16 bits, mono) tal cual llega de Azure.
+async function generarVozAzure(env, texto, voz, estilo, origen) {
+  var p = Object.prototype.hasOwnProperty.call(PROSODIA_AZURE, estilo) ? PROSODIA_AZURE[estilo] : PROSODIA_AZURE.narrador;
+  var idioma = voz.split('-').slice(0, 2).join('-');
+  var ssml = '<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="' + idioma + '">' +
+    '<voice name="' + voz + '"><prosody rate="' + p.rate + '" pitch="' + p.pitch + '"' + (p.volume ? ' volume="' + p.volume + '"' : '') + '>' +
+    escaparXml(texto) + '</prosody></voice></speak>';
+  try {
+    var r = await fetch(urlAzure(env, 'v1'), {
+      method: 'POST',
+      headers: {
+        'Ocp-Apim-Subscription-Key': env.AZURE_SPEECH_KEY,
+        'Content-Type': 'application/ssml+xml',
+        'X-Microsoft-OutputFormat': 'riff-24khz-16bit-mono-pcm',
+        'User-Agent': 'fabrica-oscura'
+      },
+      body: ssml,
+      signal: AbortSignal.timeout(TIEMPO_AZURE)
+    });
+    if (!r.ok) return responder({ error: errorAzure(r.status) }, r.status, origen);
+    return new Response(r.body, { status: 200, headers: Object.assign({ 'Content-Type': 'audio/wav' }, cabecerasCors(origen)) });
+  } catch (e) {
+    return responder({ error: 'Azure tardó demasiado en generar el audio' }, 504, origen);
+  }
+}
+
 /* ---------------- Voz de respaldo (Workers AI de Cloudflare) ---------------- */
 
 // MeloTTS: voz en español, sin límite por minuto y casi sin gasto
@@ -268,6 +342,23 @@ export default {
     if (cuerpo.accion === 'voces') {
       var lista = await listarVoces(env.GEMINI_API_KEY);
       return responder(lista.datos, lista.estado, origen);
+    }
+
+    if (cuerpo.accion === 'voces-azure' || cuerpo.accion === 'voz-azure') {
+      if (!env.AZURE_SPEECH_KEY || !env.AZURE_SPEECH_REGION) {
+        return responder({ error: 'Faltan los secretos AZURE_SPEECH_KEY y AZURE_SPEECH_REGION en Cloudflare' }, 501, origen);
+      }
+      if (!/^[a-z0-9]{3,30}$/.test(env.AZURE_SPEECH_REGION.trim())) {
+        return responder({ error: 'La región de Azure no es válida (ejemplo: eastus)' }, 500, origen);
+      }
+      if (cuerpo.accion === 'voces-azure') return listarVocesAzure(env, origen);
+
+      var textoAz = typeof cuerpo.texto === 'string' ? cuerpo.texto.trim() : '';
+      var vozAz = typeof cuerpo.voz === 'string' ? cuerpo.voz.trim() : '';
+      if (!textoAz) return responder({ error: 'No hay texto para narrar' }, 400, origen);
+      if (textoAz.length > MAX_CARACTERES_AZURE) return responder({ error: 'El fragmento de narración es demasiado largo' }, 400, origen);
+      if (!/^[a-z]{2}-[A-Z]{2}-[A-Za-z0-9:]{1,60}$/.test(vozAz)) return responder({ error: 'Voz no válida' }, 400, origen);
+      return generarVozAzure(env, textoAz, vozAz, String(cuerpo.estilo || ''), origen);
     }
 
     if (cuerpo.accion === 'voz-cloudflare') {

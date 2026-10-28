@@ -5,6 +5,8 @@
    propio navegador con lamejs (js/vendor/lame.min.js).
    Si Gemini alcanza su límite, se usa la voz de respaldo de
    Cloudflare (MeloTTS), que llega en WAV o MP3 y se pasa a 24 kHz.
+   Las voces de Microsoft Azure (rápidas, 500 000 caracteres gratis
+   al mes) llegan en WAV de 24 kHz.
    ========================================================== */
 
 var Voz = (function () {
@@ -14,6 +16,7 @@ var Voz = (function () {
   var TIEMPO_MAXIMO = 110000;          // por fragmento
   var MAX_FRAGMENTO_GEMINI = 2400;     // caracteres por pedido a Gemini (menos pedidos = menos límites)
   var MAX_FRAGMENTO_CF = 1000;         // caracteres por pedido a Cloudflare
+  var MAX_FRAGMENTO_AZURE = 2500;      // caracteres por pedido a Azure
   var FRECUENCIA = 24000;              // muestras por segundo de todo el audio
   var PAUSA_ENTRE_ESCENAS = 0.8;       // segundos de silencio entre escenas
   var ESPERA_POR_LIMITE = 60;          // segundos de espera si Google no dice cuánto esperar
@@ -22,7 +25,7 @@ var Voz = (function () {
   var CLAVE_PREFERENCIAS = 'fabricaOscura.voz.v1';
   var CLAVE_AGOTADO = 'fabricaOscura.voz.geminiAgotadoHasta';
   var ESPERA_DIARIA = 120;             // si Google pide esperar más que esto, es el límite del día
-  var EN_PARALELO_CF = 3;              // trozos que se piden a la vez a Cloudflare
+  var EN_PARALELO = 3;                 // trozos que se piden a la vez a Azure o Cloudflare
 
   // Voces básicas de Gemini, por si la lista de voces latinoamericanas no carga.
   // Hablan español; el acento latino se pide en la indicación de estilo.
@@ -43,6 +46,14 @@ var Voz = (function () {
   var VOZ_CLOUDFLARE = {
     id: 'cloudflare', nombre: 'Voz de Cloudflare', genero: 'cloudflare', proveedor: 'cloudflare',
     descripcion: 'español, sin límite por minuto (no usa los estilos)'
+  };
+
+  // Países de las voces de Azure (se dejan fuera las de España y Guinea Ecuatorial).
+  var PAISES_AZURE = {
+    MX: 'México', US: 'Estados Unidos', CO: 'Colombia', AR: 'Argentina', CL: 'Chile', PE: 'Perú',
+    VE: 'Venezuela', EC: 'Ecuador', BO: 'Bolivia', CR: 'Costa Rica', CU: 'Cuba', DO: 'República Dominicana',
+    GT: 'Guatemala', HN: 'Honduras', NI: 'Nicaragua', PA: 'Panamá', PR: 'Puerto Rico', PY: 'Paraguay',
+    SV: 'El Salvador', UY: 'Uruguay'
   };
 
   var ACENTO_LATINO = ' Habla en español latinoamericano neutro.';
@@ -117,16 +128,67 @@ var Voz = (function () {
     });
   }
 
-  // Lista de voces: primero las latinoamericanas de Gemini, luego las de respaldo.
+  // Pedido que devuelve audio (bytes). Si algo falla, el intermediario responde un error en JSON.
+  function enviarAudio(cuerpo) {
+    var control = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    var temporizador = control ? setTimeout(function () { control.abort(); }, TIEMPO_MAXIMO) : null;
+    return fetch(URL_INTERMEDIARIO, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(cuerpo),
+      signal: control ? control.signal : undefined
+    }).then(function (r) {
+      if (r.ok) return r.arrayBuffer().then(function (b) { return new Uint8Array(b); });
+      return r.json().catch(function () { return {}; }).then(function (datos) {
+        var err = new Error(typeof datos.error === 'string' ? datos.error : 'Azure no pudo generar la voz.');
+        err.estado = r.status;
+        throw err;
+      });
+    }, function (e) {
+      var err = new Error(e && e.name === 'AbortError' ? 'Azure tardó demasiado en generar el audio. Intenta de nuevo.'
+        : 'No se pudo conectar con el intermediario. Revisa tu conexión a internet.');
+      err.estado = 504;
+      throw err;
+    }).finally(function () {
+      if (temporizador) clearTimeout(temporizador);
+    });
+  }
+
+  // Voces latinoamericanas de Azure. Si Azure no está configurado, la lista queda vacía.
+  function cargarVocesAzure() {
+    if (location.protocol === 'file:') return Promise.resolve([]);
+    return fetch(URL_INTERMEDIARIO, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ accion: 'voces-azure' })
+    }).then(function (r) {
+      return r.ok ? r.json() : [];
+    }).then(function (lista) {
+      return (Array.isArray(lista) ? lista : []).filter(function (v) {
+        var pais = String(v.Locale || '').split('-')[1];
+        return /^es-/.test(v.Locale || '') && PAISES_AZURE[pais] && v.VoiceType === 'Neural' &&
+          /^[a-z]{2}-[A-Z]{2}-[A-Za-z0-9]+$/.test(v.ShortName || '') && !/HD/.test(v.ShortName) &&
+          (v.Gender === 'Male' || v.Gender === 'Female');
+      }).map(function (v) {
+        var pais = PAISES_AZURE[v.Locale.split('-')[1]];
+        return {
+          id: v.ShortName, nombre: v.LocalName || v.DisplayName || v.ShortName, genero: v.Gender === 'Male' ? 'male' : 'female',
+          proveedor: 'azure', pais: pais, descripcion: 'Microsoft Azure · ' + pais + ' (rápida)'
+        };
+      });
+    }).catch(function () { return []; });
+  }
+
+  // Lista de voces: Azure, luego las latinoamericanas de Gemini y luego las de respaldo.
   function cargarVoces() {
-    return enviar({ accion: 'voces' }).then(function (datos) {
-      var latinas = (datos.voces || []).map(function (v) {
+    var gemini = enviar({ accion: 'voces' }).then(function (datos) {
+      return (datos.voces || []).map(function (v) {
         v.latina = true;
         return v;
       });
-      return latinas.concat(VOCES_RESPALDO, [VOZ_CLOUDFLARE]);
-    }, function () {
-      return VOCES_RESPALDO.concat([VOZ_CLOUDFLARE]);
+    }, function () { return []; });
+    return Promise.all([cargarVocesAzure(), gemini]).then(function (r) {
+      return r[0].concat(r[1], VOCES_RESPALDO, [VOZ_CLOUDFLARE]);
     });
   }
 
@@ -313,8 +375,13 @@ var Voz = (function () {
   }
 
   // Un fragmento de texto → muestras de audio. Si se alcanza el límite por minuto, espera y reintenta.
+  function sintetizarAzure(texto, voz, estilo) {
+    return enviarAudio({ accion: 'voz-azure', texto: texto, voz: voz.id, estilo: estilo }).then(leerPCM);
+  }
+
   function sintetizar(texto, voz, estilo, alEsperar, intento) {
     if (voz.proveedor === 'cloudflare') return sintetizarCloudflare(texto);
+    if (voz.proveedor === 'azure') return sintetizarAzure(texto, voz, estilo);
     if (geminiAgotadoHasta()) return Promise.reject(errorAgotado());
     intento = intento || 0;
     var conEstilo = !estiloNoAdmitido;
@@ -387,18 +454,18 @@ var Voz = (function () {
         return a;
       });
     }
-    if (voz.proveedor !== 'cloudflare' && geminiAgotadoHasta()) {
+    if (!voz.proveedor && geminiAgotadoHasta()) {
       return conCloudflare('Gemini ya usó sus audios gratis de hoy (se renueva en ' + textoRenovacion() + '). Usando la voz de Cloudflare…');
     }
     return narrarCon(proyecto, voz, estilo, alProgreso, cancelado).catch(function (err) {
       if (voz.proveedor === 'cloudflare' || !convieneRespaldo(err) || (cancelado && cancelado())) throw err;
-      return conCloudflare('Gemini alcanzó su límite. Cambiando a la voz de Cloudflare para toda la historia…');
+      return conCloudflare((voz.proveedor === 'azure' ? 'Azure' : 'Gemini') + ' alcanzó su límite. Cambiando a la voz de Cloudflare para toda la historia…');
     });
   }
 
   function narrarCon(proyecto, voz, estilo, alProgreso, cancelado) {
-    var esCF = voz.proveedor === 'cloudflare';
-    var maximo = esCF ? MAX_FRAGMENTO_CF : MAX_FRAGMENTO_GEMINI;
+    var esCF = voz.proveedor === 'cloudflare', esAzure = voz.proveedor === 'azure';
+    var maximo = esCF ? MAX_FRAGMENTO_CF : esAzure ? MAX_FRAGMENTO_AZURE : MAX_FRAGMENTO_GEMINI;
     var trabajos = [];
     proyecto.escenas.forEach(function (e, i) {
       dividir(e.narracion || '', maximo).forEach(function (t, j) {
@@ -407,9 +474,9 @@ var Voz = (function () {
     });
     if (!trabajos.length) return Promise.reject(new Error('Ninguna escena tiene narración. Escríbela o genérala con IA primero.'));
 
-    // Gemini: de uno en uno (por sus límites). Cloudflare: varios a la vez (es más rápido).
+    // Gemini: de uno en uno (por sus límites). Azure y Cloudflare: varios a la vez (es más rápido).
     var resultados = new Array(trabajos.length), hechos = 0, proximo = 0, fallo = false;
-    var quien = esCF ? 'Generando voz de Cloudflare' : 'Generando voz';
+    var quien = esCF ? 'Generando voz de Cloudflare' : esAzure ? 'Generando voz de Azure' : 'Generando voz';
     var inicio = Date.now(), esperando = false;
     function mostrar() {
       if (esperando) return;
@@ -438,7 +505,7 @@ var Voz = (function () {
     }
 
     var obreros = [];
-    for (var n = 0; n < (esCF ? EN_PARALELO_CF : 1); n++) obreros.push(obrero());
+    for (var n = 0; n < (esCF || esAzure ? EN_PARALELO : 1); n++) obreros.push(obrero());
 
     return Promise.all(obreros).finally(function () {
       clearInterval(reloj);

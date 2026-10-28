@@ -20,6 +20,9 @@ var Voz = (function () {
   var ESPERA_MINIMA = 5;               // segundos mínimos de espera ante el límite por minuto
   var REINTENTOS_POR_LIMITE = 1;       // después se cambia a la voz de Cloudflare
   var CLAVE_PREFERENCIAS = 'fabricaOscura.voz.v1';
+  var CLAVE_AGOTADO = 'fabricaOscura.voz.geminiAgotadoHasta';
+  var ESPERA_DIARIA = 120;             // si Google pide esperar más que esto, es el límite del día
+  var EN_PARALELO_CF = 3;              // trozos que se piden a la vez a Cloudflare
 
   // Voces básicas de Gemini, por si la lista de voces latinoamericanas no carga.
   // Hablan español; el acento latino se pide en la indicación de estilo.
@@ -265,11 +268,37 @@ var Voz = (function () {
     });
   }
 
-  // Google suele decir cuánto esperar ("Please retry in 23.4s"). Si no lo dice, se esperan 60 s.
-  function segundosDeEspera(err) {
-    var m = /retry in ([\d.]+)\s*s/i.exec(err.original || '');
-    if (!m) return ESPERA_POR_LIMITE;
-    return Math.min(ESPERA_POR_LIMITE, Math.max(ESPERA_MINIMA, Math.ceil(parseFloat(m[1])) + 2));
+  // Google dice cuánto esperar: "Please retry in 23.4s" o "Please retry in 3h30m19s".
+  // Devuelve los segundos, o null si no lo dice.
+  function segundosPedidos(err) {
+    var m = /retry in\s*(?:(\d+)\s*h)?\s*(?:(\d+)\s*m(?!s))?\s*(?:([\d.]+)\s*s)?/i.exec(err.original || '');
+    if (!m || !(m[1] || m[2] || m[3])) return null;
+    return (+m[1] || 0) * 3600 + (+m[2] || 0) * 60 + Math.ceil(parseFloat(m[3]) || 0);
+  }
+
+  /* Límite diario de Gemini (gratis: 10 audios al día por modelo). Se recuerda hasta
+     que se renueve, para ir directo a la voz de Cloudflare sin perder tiempo. */
+  function geminiAgotadoHasta() {
+    var hasta = 0;
+    try { hasta = +localStorage.getItem(CLAVE_AGOTADO) || 0; } catch (e) { hasta = 0; }
+    return hasta > Date.now() ? hasta : 0;
+  }
+
+  function marcarAgotado(segundos) {
+    try { localStorage.setItem(CLAVE_AGOTADO, String(Date.now() + segundos * 1000)); } catch (e) { /* no pasa nada */ }
+  }
+
+  function textoRenovacion() {
+    var min = Math.max(1, Math.round((geminiAgotadoHasta() - Date.now()) / 60000));
+    return min >= 60 ? Math.floor(min / 60) + ' h ' + (min % 60) + ' min' : min + ' min';
+  }
+
+  function errorAgotado() {
+    var err = new Error('Gemini ya usó sus audios gratis de hoy (10 por modelo). Se renueva en ' + textoRenovacion() +
+      '. Mientras tanto elige la "Voz de Cloudflare".');
+    err.estado = 429;
+    err.diario = true;
+    return err;
   }
 
   // Si el modelo de voz disponible no acepta la indicación de estilo, se deja de enviar
@@ -286,6 +315,7 @@ var Voz = (function () {
   // Un fragmento de texto → muestras de audio. Si se alcanza el límite por minuto, espera y reintenta.
   function sintetizar(texto, voz, estilo, alEsperar, intento) {
     if (voz.proveedor === 'cloudflare') return sintetizarCloudflare(texto);
+    if (geminiAgotadoHasta()) return Promise.reject(errorAgotado());
     intento = intento || 0;
     var conEstilo = !estiloNoAdmitido;
     return enviar({ accion: 'voz', texto: texto, voz: voz.id, estilo: conEstilo ? textoEstilo(estilo, voz) : '' }).then(function (datos) {
@@ -297,8 +327,16 @@ var Voz = (function () {
         estiloNoAdmitido = true;
         return sintetizar(texto, voz, estilo, alEsperar, intento);
       }
-      if (err.estado === 429 && intento < REINTENTOS_POR_LIMITE) {
-        return esperar(segundosDeEspera(err), alEsperar).then(function () {
+      if (err.estado !== 429) throw err;
+      var pedidos = segundosPedidos(err);
+      // Límite del día: no tiene sentido esperar horas.
+      if (/per day|daily/i.test(err.original) || pedidos > ESPERA_DIARIA) {
+        marcarAgotado(pedidos || 3600);
+        throw errorAgotado();
+      }
+      if (intento < REINTENTOS_POR_LIMITE) {
+        var espera = pedidos === null ? ESPERA_POR_LIMITE : Math.min(ESPERA_POR_LIMITE, Math.max(ESPERA_MINIMA, pedidos + 2));
+        return esperar(espera, alEsperar).then(function () {
           return sintetizar(texto, voz, estilo, alEsperar, intento + 1);
         });
       }
@@ -339,21 +377,28 @@ var Voz = (function () {
 
   // Narra todas las escenas. alProgreso({ hecho, total, mensaje }). cancelado() → true para detener.
   // Devuelve también "segmentos": qué texto suena en qué segundo (para subtítulos y video).
-  // Si Gemini falla por su límite, vuelve a narrar TODO con la voz de Cloudflare (para que no cambie
+  // Si Gemini falla por su límite, narra TODO con la voz de Cloudflare (para que no cambie
   // de voz a mitad de la historia) y lo indica con "respaldo: true".
   function narrarProyecto(proyecto, voz, estilo, alProgreso, cancelado) {
-    return narrarCon(proyecto, voz, estilo, alProgreso, cancelado).catch(function (err) {
-      if (voz.proveedor === 'cloudflare' || !convieneRespaldo(err) || (cancelado && cancelado())) throw err;
-      alProgreso({ hecho: 0, total: 1, mensaje: 'Gemini alcanzó su límite. Cambiando a la voz de Cloudflare para toda la historia…' });
+    function conCloudflare(mensaje) {
+      alProgreso({ hecho: 0, total: 1, mensaje: mensaje });
       return narrarCon(proyecto, VOZ_CLOUDFLARE, estilo, alProgreso, cancelado).then(function (a) {
         a.respaldo = true;
         return a;
       });
+    }
+    if (voz.proveedor !== 'cloudflare' && geminiAgotadoHasta()) {
+      return conCloudflare('Gemini ya usó sus audios gratis de hoy (se renueva en ' + textoRenovacion() + '). Usando la voz de Cloudflare…');
+    }
+    return narrarCon(proyecto, voz, estilo, alProgreso, cancelado).catch(function (err) {
+      if (voz.proveedor === 'cloudflare' || !convieneRespaldo(err) || (cancelado && cancelado())) throw err;
+      return conCloudflare('Gemini alcanzó su límite. Cambiando a la voz de Cloudflare para toda la historia…');
     });
   }
 
   function narrarCon(proyecto, voz, estilo, alProgreso, cancelado) {
-    var maximo = voz.proveedor === 'cloudflare' ? MAX_FRAGMENTO_CF : MAX_FRAGMENTO_GEMINI;
+    var esCF = voz.proveedor === 'cloudflare';
+    var maximo = esCF ? MAX_FRAGMENTO_CF : MAX_FRAGMENTO_GEMINI;
     var trabajos = [];
     proyecto.escenas.forEach(function (e, i) {
       dividir(e.narracion || '', maximo).forEach(function (t, j) {
@@ -362,30 +407,47 @@ var Voz = (function () {
     });
     if (!trabajos.length) return Promise.reject(new Error('Ninguna escena tiene narración. Escríbela o genérala con IA primero.'));
 
-    var partes = [], segmentos = [], frecuencia = FRECUENCIA, posicion = 0, k = 0;
-    var quien = voz.proveedor === 'cloudflare' ? 'Generando voz de Cloudflare' : 'Generando voz';
-    function siguiente() {
+    // Gemini: de uno en uno (por sus límites). Cloudflare: varios a la vez (es más rápido).
+    var resultados = new Array(trabajos.length), hechos = 0, proximo = 0, fallo = false;
+    var quien = esCF ? 'Generando voz de Cloudflare' : 'Generando voz';
+    var inicio = Date.now(), esperando = false;
+    function mostrar() {
+      if (esperando) return;
+      alProgreso({ hecho: hechos, total: trabajos.length,
+        mensaje: quien + ': ' + hechos + ' de ' + trabajos.length + ' partes listas… lleva ' + Math.round((Date.now() - inicio) / 1000) + ' s' });
+    }
+    mostrar();
+    var reloj = setInterval(mostrar, 1000);
+
+    function obrero() {
+      if (fallo || proximo >= trabajos.length) return Promise.resolve();
       if (cancelado && cancelado()) return Promise.reject(new Error('Generación de audio cancelada.'));
-      if (k >= trabajos.length) {
-        var muestras = unir(partes);
-        return { muestras: muestras, frecuencia: frecuencia, duracion: muestras.length / frecuencia, segmentos: segmentos };
-      }
-      var t = trabajos[k];
-      var texto = quien + ': escena ' + t.escena + ' (parte ' + (k + 1) + ' de ' + trabajos.length + ')…';
-      // Cada parte larga tarda casi un minuto: un contador de segundos muestra que sigue trabajando.
-      var inicio = Date.now(), esperando = false;
-      function mostrar() {
-        if (!esperando) alProgreso({ hecho: k, total: trabajos.length, mensaje: texto + ' lleva ' + Math.round((Date.now() - inicio) / 1000) + ' s' });
-      }
-      mostrar();
-      var reloj = setInterval(mostrar, 1000);
-      return sintetizar(t.texto, voz, estilo, function (s) {
+      var k = proximo++;
+      return sintetizar(trabajos[k].texto, voz, estilo, function (s) {
         esperando = s > 0;
-        if (!esperando) inicio = Date.now();
-        alProgreso({ hecho: k, total: trabajos.length, mensaje: 'Límite por minuto de Gemini alcanzado. Reintentando en ' + s + ' s…' });
-      }).finally(function () {
-        clearInterval(reloj);
+        if (esperando) alProgreso({ hecho: hechos, total: trabajos.length, mensaje: 'Límite por minuto de Gemini alcanzado. Reintentando en ' + s + ' s…' });
       }).then(function (a) {
+        resultados[k] = a;
+        hechos++;
+        mostrar();
+        return obrero();
+      }, function (err) {
+        fallo = true;
+        throw err;
+      });
+    }
+
+    var obreros = [];
+    for (var n = 0; n < (esCF ? EN_PARALELO_CF : 1); n++) obreros.push(obrero());
+
+    return Promise.all(obreros).finally(function () {
+      clearInterval(reloj);
+    }).then(function () {
+      if (cancelado && cancelado()) throw new Error('Generación de audio cancelada.');
+      // Se unen los trozos en orden, con una pausa entre escenas.
+      var partes = [], segmentos = [], frecuencia = FRECUENCIA, posicion = 0;
+      trabajos.forEach(function (t, k) {
+        var a = resultados[k];
         frecuencia = a.frecuencia;
         if (t.primeroDeEscena && partes.length) {
           var pausa = new Int16Array(Math.round(PAUSA_ENTRE_ESCENAS * frecuencia));
@@ -395,11 +457,10 @@ var Voz = (function () {
         segmentos.push({ escenaId: t.escenaId, texto: t.texto, inicio: posicion / frecuencia, fin: (posicion + a.muestras.length) / frecuencia });
         partes.push(a.muestras);
         posicion += a.muestras.length;
-        k++;
-        return siguiente();
       });
-    }
-    return Promise.resolve().then(siguiente);
+      var muestras = unir(partes);
+      return { muestras: muestras, frecuencia: frecuencia, duracion: muestras.length / frecuencia, segmentos: segmentos };
+    });
   }
 
   return {

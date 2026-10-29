@@ -438,6 +438,7 @@ var YouTube = (function () {
       'Título de trabajo: ' + proyecto.titulo,
       'Subgénero: ' + (Ideas.SUBGENEROS[proyecto.subgenero] || 'terror'),
       minutos ? 'Duración del video: unos ' + minutos + ' minutos' : '',
+      duracionSegundos && duracionSegundos <= 180 ? 'Es un YouTube Short (vertical): título corto e impactante, descripción de 1 o 2 frases, y uno de los hashtags debe ser #Shorts.' : '',
       'Premisa: ' + (proyecto.descripcion.trim() || '(sin premisa)').slice(0, 1500),
       '',
       'Narración del video (puede estar recortada):',

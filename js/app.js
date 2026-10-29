@@ -498,8 +498,8 @@
             '<button type="button" class="btn btn-sm" data-action="agregar-escena">+ Añadir escena</button></div>' +
           '<div class="guion-ia">' +
             '<label>Duración objetivo<select id="duracionObjetivo">' +
-              [5, 8, 10, 12, 15].map(function (m) {
-                return '<option value="' + m + '"' + (m === duracionObjetivo ? ' selected' : '') + '>' + m + ' minutos</option>';
+              DURACIONES.map(function (d) {
+                return '<option value="' + d.minutos + '"' + (d.minutos === duracionObjetivo ? ' selected' : '') + '>' + d.nombre + '</option>';
               }).join('') +
             '</select></label>' +
             '<button type="button" class="btn btn-primary" data-action="guion-completo">✍️ Escribir guion completo con IA</button>' +
@@ -707,6 +707,17 @@
   }
 
   var duracionObjetivo = 10;     // minutos
+  // Las de menos de 3 minutos son para Shorts (video vertical 9:16).
+  var DURACIONES = [
+    { minutos: 0.9, nombre: '📱 Short: menos de 1 minuto' },
+    { minutos: 2, nombre: '📱 Short: 2 minutos' },
+    { minutos: 5, nombre: '5 minutos' },
+    { minutos: 8, nombre: '8 minutos' },
+    { minutos: 10, nombre: '10 minutos' },
+    { minutos: 12, nombre: '12 minutos' },
+    { minutos: 15, nombre: '15 minutos' }
+  ];
+  function esShort() { return duracionObjetivo < 3; }
   var guionDetenido = false;
 
   // Palabras por escena para llegar a la duración elegida.
@@ -751,7 +762,7 @@
         var i = proyecto.escenas.findIndex(function (e) { return e.id === ids[k]; });
         if (i < 0) { k++; return siguiente(); }   // escena borrada mientras tanto
         mensaje('⏳ Escribiendo escena ' + (k + 1) + ' de ' + ids.length + '… (cada una puede tardar hasta un minuto)');
-        return IA.escribirNarracion(proyecto, i, palabras).then(function (texto) {
+        return IA.escribirNarracion(proyecto, i, palabras, esShort()).then(function (texto) {
           if (!editor || editor.proyecto !== proyecto) return 'salio';
           var escena = proyecto.escenas.find(function (e) { return e.id === ids[k]; });
           if (escena) escena.narracion = texto;
@@ -1982,7 +1993,17 @@
     }
     if (!editor) return;
     if (t.id === 'vozSelect' || t.id === 'vozEstilo') { guardarEleccionVoz(); return; }
-    if (t.id === 'duracionObjetivo') { duracionObjetivo = Number(t.value) || 10; return; }
+    if (t.id === 'duracionObjetivo') {
+      duracionObjetivo = Number(t.value) || 10;
+      if (esShort()) {   // los Shorts van en vertical: se elige 9:16 para imágenes y video
+        ['imgFormato', 'videoFormato'].forEach(function (id) {
+          var sel = document.getElementById(id);
+          if (sel) sel.value = '9:16';
+        });
+        aviso('Modo Short: imágenes y video en vertical 9:16');
+      }
+      return;
+    }
     if (t.id === 'videoVolumen') { document.getElementById('videoVolumenValor').textContent = t.value + '%'; return; }
     if (t.id === 'videoMusica') { document.getElementById('videoArchivoCaja').hidden = t.value !== 'archivo'; return; }
     if (t.id === 'videoFormato' || t.id === 'videoSubtitulos' || t.id === 'videoArchivo') return;

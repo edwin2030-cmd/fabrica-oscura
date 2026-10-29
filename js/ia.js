@@ -99,11 +99,12 @@ var IA = (function () {
 
   // Escribe la narración (voz en off) de una escena usando el contexto del proyecto.
   // palabras: largo aproximado deseado (por defecto, unas 200).
-  function escribirNarracion(proyecto, indice, palabras) {
+  // corto: true si es un Short (menos de 3 minutos), con ritmo rápido.
+  function escribirNarracion(proyecto, indice, palabras, corto) {
     var escenas = proyecto.escenas;
     var e = escenas[indice];
     var anterior = indice > 0 ? escenas[indice - 1].narracion.trim() : '';
-    var objetivo = Math.max(80, Math.min(700, Math.round(palabras || 200)));
+    var objetivo = Math.max(corto ? 15 : 80, Math.min(700, Math.round(palabras || 200)));
     var esUltima = indice === escenas.length - 1;
 
     var partes = [
@@ -112,6 +113,8 @@ var IA = (function () {
       'Sin títulos, sin acotaciones, sin indicaciones de cámara ni de sonido, sin comillas alrededor.',
       'Largo: unas ' + objetivo + ' palabras (entre ' + Math.round(objetivo * 0.85) + ' y ' + Math.round(objetivo * 1.15) + '). Es importante respetar ese largo.',
       'Frases claras para leer en voz alta, con tensión, atmósfera y detalles concretos.',
+      corto ? 'Es un YouTube Short (video vertical de menos de ' + (palabras * escenas.length > 160 ? 'tres minutos' : 'un minuto') + '): ritmo muy rápido, frases cortas, nada de relleno.' +
+        (indice === 0 ? ' La primera frase debe atrapar en 2 segundos.' : '') : '',
       esUltima ? 'Es la última escena: cierra la historia con un final inquietante.' : 'No cierres la historia todavía: termina dejando tensión para la siguiente escena.',
       '',
       'Título del video: ' + proyecto.titulo,
@@ -122,7 +125,7 @@ var IA = (function () {
       'Título de la escena: ' + (e.titulo.trim() || '(sin título)')
     ];
     if (e.notas.trim()) partes.push('Notas del guionista para esta escena: ' + e.notas.trim());
-    if (e.narracion.trim()) partes.push('Borrador actual (úsalo como base, mejóralo y amplíalo hasta el largo pedido): ' + e.narracion.trim().slice(0, 1200));
+    if (e.narracion.trim()) partes.push('Borrador actual (úsalo como base, mejóralo y ajústalo al largo pedido): ' + e.narracion.trim().slice(0, 1200));
     if (anterior) partes.push('', 'Narración de la escena anterior (continúa desde aquí sin repetirla): ' + anterior.slice(-1000));
 
     return pedir(partes.join('\n').slice(0, 3900));

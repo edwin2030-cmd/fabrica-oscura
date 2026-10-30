@@ -722,9 +722,21 @@
   function esShort() { return duracionObjetivo < 3; }
   var guionDetenido = false;
 
+  // Velocidad real de la última voz generada (palabras por minuto), medida al crear el audio.
+  var CLAVE_VELOCIDAD = 'fabricaOscura.voz.palabrasPorMinuto';
+  function velocidadVoz() {
+    var v = Number(localStorage.getItem(CLAVE_VELOCIDAD));
+    return v >= 60 && v <= 220 ? v : 0;
+  }
+
   // Palabras por escena para llegar a la duración elegida.
+  // En los Shorts se descuentan las pausas entre escenas y un margen, y se usa la velocidad real
+  // de la voz (el narrador de terror habla más lento que 150 palabras por minuto).
   function palabrasPorEscena(proyecto) {
-    return duracionObjetivo * PALABRAS_POR_MINUTO / Math.max(1, proyecto.escenas.length);
+    var n = Math.max(1, proyecto.escenas.length);
+    if (!esShort()) return duracionObjetivo * PALABRAS_POR_MINUTO / n;
+    var segundos = duracionObjetivo * 60 - (n - 1) * Voz.PAUSA_ENTRE_ESCENAS - 4;
+    return Math.max(10, segundos * (velocidadVoz() || 120) / 60 / n);
   }
 
   function guionCompletoIA(boton) {
@@ -1016,8 +1028,20 @@
         proyectoId: proyecto.id, wav: wav, frecuencia: a.frecuencia, segmentos: a.segmentos,
         duracion: a.duracion, creado: new Date().toISOString()
       }).catch(function (err) { aviso(err.message, 'error'); });
+      // Se mide la velocidad real de la voz para calcular mejor el largo del próximo guion.
+      var palabras = estadisticas(proyecto).palabras;
+      var conTexto = proyecto.escenas.filter(function (e) { return e.narracion.trim(); }).length;
+      var segVoz = a.duracion - Math.max(0, conTexto - 1) * Voz.PAUSA_ENTRE_ESCENAS;
+      if (palabras >= 40 && segVoz > 5) localStorage.setItem(CLAVE_VELOCIDAD, String(Math.round(palabras / segVoz * 60)));
       if (editor && editor.proyecto === proyecto) {
         mostrarAudio(audioVoz.url);
+        if (esShort() && a.duracion > duracionObjetivo * 60 + 1) {
+          var sobran = Math.ceil((a.duracion - duracionObjetivo * 60) * (velocidadVoz() || 120) / 60) + 5;
+          setTimeout(function () {
+            aviso('El audio dura ' + Math.round(a.duracion) + ' s y pasa del Short. Quita unas ' + sobran +
+              ' palabras o pulsa otra vez "Escribir guion completo con IA" (ahora ya conoce la velocidad de tu voz).', 'error');
+          }, 3500);
+        }
         aviso(a.respaldo
           ? 'La voz elegida llegó a su límite, así que se usó la voz de Cloudflare. Audio listo: ' + formatoDuracion(a.duracion * PALABRAS_POR_MINUTO / 60) + ' min'
           : 'Audio listo: ' + formatoDuracion(a.duracion * PALABRAS_POR_MINUTO / 60) + ' min');

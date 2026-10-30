@@ -532,6 +532,7 @@ var Voz = (function () {
 
   return {
     ESTILOS: ESTILOS,
+    PAUSA_ENTRE_ESCENAS: PAUSA_ENTRE_ESCENAS,
     VOCES_RESPALDO: VOCES_RESPALDO,
     VOZ_CLOUDFLARE: VOZ_CLOUDFLARE,
     leerPreferencias: leerPreferencias,

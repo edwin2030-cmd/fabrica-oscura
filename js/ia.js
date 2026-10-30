@@ -104,14 +104,16 @@ var IA = (function () {
     var escenas = proyecto.escenas;
     var e = escenas[indice];
     var anterior = indice > 0 ? escenas[indice - 1].narracion.trim() : '';
-    var objetivo = Math.max(corto ? 15 : 80, Math.min(700, Math.round(palabras || 200)));
+    var objetivo = Math.max(corto ? 10 : 80, Math.min(700, Math.round(palabras || 200)));
     var esUltima = indice === escenas.length - 1;
 
     var partes = [
       'Eres el narrador de un canal de YouTube en español de historias de terror y misterio.',
       'Escribe SOLO el texto de la narración (voz en off) de UNA escena del guion.',
       'Sin títulos, sin acotaciones, sin indicaciones de cámara ni de sonido, sin comillas alrededor.',
-      'Largo: unas ' + objetivo + ' palabras (entre ' + Math.round(objetivo * 0.85) + ' y ' + Math.round(objetivo * 1.15) + '). Es importante respetar ese largo.',
+      corto
+        ? 'Largo: entre ' + Math.round(objetivo * 0.8) + ' y ' + objetivo + ' palabras. NUNCA pases de ' + objetivo + ' palabras: el video tiene un tiempo máximo.'
+        : 'Largo: unas ' + objetivo + ' palabras (entre ' + Math.round(objetivo * 0.85) + ' y ' + Math.round(objetivo * 1.15) + '). Es importante respetar ese largo.',
       'Frases claras para leer en voz alta, con tensión, atmósfera y detalles concretos.',
       corto ? 'Es un YouTube Short (video vertical de menos de ' + (palabras * escenas.length > 160 ? 'tres minutos' : 'un minuto') + '): ritmo muy rápido, frases cortas, nada de relleno.' +
         (indice === 0 ? ' La primera frase debe atrapar en 2 segundos.' : '') : '',
@@ -128,7 +130,21 @@ var IA = (function () {
     if (e.narracion.trim()) partes.push('Borrador actual (úsalo como base, mejóralo y ajústalo al largo pedido): ' + e.narracion.trim().slice(0, 1200));
     if (anterior) partes.push('', 'Narración de la escena anterior (continúa desde aquí sin repetirla): ' + anterior.slice(-1000));
 
-    return pedir(partes.join('\n').slice(0, 3900));
+    var pedido = pedir(partes.join('\n').slice(0, 3900));
+    return corto ? pedido.then(function (t) { return recortarFrases(t, Math.round(objetivo * 1.05)); }) : pedido;
+  }
+
+  // En los Shorts, si Gemini escribe de más, se quitan frases del final (nunca a media frase).
+  function recortarFrases(texto, maxPalabras) {
+    var contar = function (t) { return t.trim() ? t.trim().split(/\s+/).length : 0; };
+    if (contar(texto) <= maxPalabras) return texto;
+    var frases = texto.match(/[^.!?…]+[.!?…]+["»”]?\s*/g) || [texto];
+    var salida = '';
+    for (var i = 0; i < frases.length; i++) {
+      if (salida && contar(salida + frases[i]) > maxPalabras) break;
+      salida += frases[i];
+    }
+    return salida.trim();
   }
 
   return {

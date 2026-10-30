@@ -63,6 +63,8 @@ var Imagenes = (function () {
       }).join('\n\n');
     }
 
+    // Con muchas tomas, prompts más cortos para que la respuesta de Gemini no se corte.
+    var muchas = porEscena * escenas.length > 30;
     var prompt = [
       'Eres director de arte de un canal de YouTube de historias de terror y misterio.',
       'Analiza la historia y prepara las imágenes que acompañarán la narración.',
@@ -75,8 +77,8 @@ var Imagenes = (function () {
       '  "personajes": [{ "nombre": "nombre", "rasgos": "physical description in English, 25-40 words" }],',
       '  "lugares": [{ "nombre": "nombre", "rasgos": "visual description in English, 20-35 words" }],',
       '  "estilo": "overall visual style and color palette in English, 15-25 words",',
-      '  "tomas": [{ "escena": 1, "descripcion": "qué se ve, en español, una o dos frases", ' +
-        '"prompt": "image prompt in English, 40-70 words: shot type, camera angle, subject, action, setting, lighting", ' +
+      '  "tomas": [{ "escena": 1, "descripcion": "qué se ve, en español, ' + (muchas ? 'una frase corta' : 'una o dos frases') + '", ' +
+        '"prompt": "image prompt in English, ' + (muchas ? '30-45' : '40-70') + ' words: shot type, camera angle, subject, action, setting, lighting", ' +
         '"personajes": ["nombres que aparecen"], "lugar": "nombre del lugar" }]',
       '}',
       '',

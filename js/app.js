@@ -513,7 +513,9 @@
               '<label>Formato<select id="imgFormato">' + Object.keys(Imagenes.FORMATOS).map(function (k) {
                 return '<option value="' + esc(k) + '">' + esc(Imagenes.FORMATOS[k].nombre) + '</option>';
               }).join('') + '</select></label>' +
-              '<label>Imágenes por escena<select id="imgPorEscena"><option value="1">1</option><option value="2" selected>2</option><option value="3">3</option></select></label>' +
+              '<label title="Más imágenes = el video cambia de imagen más seguido, pero tarda más y gasta más del límite diario gratis de Cloudflare">Imágenes por escena<select id="imgPorEscena">' +
+                [1, 2, 3, 4, 5, 6].map(function (n) { return '<option value="' + n + '"' + (n === 2 ? ' selected' : '') + '>' + n + '</option>'; }).join('') +
+              '</select></label>' +
               '<label class="check"><input type="checkbox" id="imgReferencia" checked> Usar la primera imagen como referencia de personajes</label>' +
             '</div>' +
             '<div class="img-acciones">' +
